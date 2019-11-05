@@ -245,17 +245,6 @@ def _convert_dense(inexpr, keras_layer, etab):
         out = _op.expand_dims(out, axis=0)
     return out
 
-
-def quantize(x, bits):
-    x = tf.clip_by_value(x, -1, 1)  # -1 and 1 can be changed
-    x = x + 1
-    scale = (2 ** bits - 1) / 2
-    x = x * scale
-    x = _smooth_round(x)  # this is not differiable
-    quantized_x = (((x / 255) - 0.5) * 2)
-    return quantized_x
-
-
 def quantized(inexpr, bits):
     x = _op.tensor.clip(inexpr, -1.0, 1)
     x = x + 1
@@ -273,7 +262,7 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
     weightList = keras_layer.get_weights()
     inexpr = quantized(inexpr, 8)
     weightList = quantized(weightList, 8)
-    
+
     if is_deconv:
         kernel_h, kernel_w, n_filters, in_channels = weightList[0].shape
         weight = weightList[0].transpose([3, 2, 0, 1])
