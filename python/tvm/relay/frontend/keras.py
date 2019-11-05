@@ -27,8 +27,9 @@ from .. import function as _function
 from .. import op as _op
 from ... import nd as _nd
 from .common import ExprTable, new_var
-import tensorflow.keras as keras
+import tensorflow.python.keras as keras
 import tensorflow as tf
+from tensorflow.python.keras.engine import training
 
 __all__ = ['from_keras']
 
@@ -1062,7 +1063,7 @@ def from_keras(model, shape=None, layout='NCHW'):
         import keras
     except ImportError:
         raise ImportError('Keras must be installed')
-    assert isinstance(model, keras.models.Model)
+    assert isinstance(model, training.Model)
     if keras.backend.backend() != 'tensorflow':
         raise ValueError("Keras frontend currently supports tensorflow backend only.")
     if keras.backend.image_data_format() != 'channels_last':
