@@ -27,9 +27,6 @@ from .. import function as _function
 from .. import op as _op
 from ... import nd as _nd
 from .common import ExprTable, new_var
-import tensorflow.python.keras as keras
-import tensorflow as tf
-from tensorflow.python.keras.engine import training
 
 __all__ = ['from_keras']
 
@@ -917,6 +914,7 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 
 _convert_map = {
+    'QConv'                    : _convert_Qconvolution, 
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
@@ -1060,10 +1058,10 @@ def from_keras(model, shape=None, layout='NCHW'):
     def _check_model_is_tf_keras():
         return type(model).__module__.startswith("tensorflow.python.keras")
     try:
-        import keras
+        from tensorflow.python import keras
     except ImportError:
         raise ImportError('Keras must be installed')
-    assert isinstance(model, training.Model)
+    assert isinstance(model, keras.engine.training.Model)
     if keras.backend.backend() != 'tensorflow':
         raise ValueError("Keras frontend currently supports tensorflow backend only.")
     if keras.backend.image_data_format() != 'channels_last':
