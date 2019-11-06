@@ -242,8 +242,47 @@ def _convert_dense(inexpr, keras_layer, etab):
     if input_dim > 2:
         out = _op.expand_dims(out, axis=0)
     return out
+#################################################################################################################################
+# Xin's implmentation for SR project
 
-def quantized(inexpr, bits):
+def _convert_normalize(inexpr, keras_layer, etab):
+    x = tvm.relay.expr.const(np.array([0.4488, 0.4371, 0.4040]) * 255, "float32")
+    y = tvm.relay.expr.const(127.5, "float32")
+    out = _op.tensor.subtract(inexpr, x)
+    out = _op.tensor.divide(out, y)
+    return out
+
+def _convert_denormalize(inexpr, keras_layer, etab):
+    x = tvm.relay.expr.const(np.array([0.4488, 0.4371, 0.4040]) * 255, "float32")
+    y = tvm.relay.expr.const(127.5, "float32")
+    out = _op.tensor.multiply(inexpr, y)
+    out = _op.tensor.add(out, x)
+    return out
+
+def _convert_scale(inexpr, keras_layer, etab):
+    factor = keras_layer.scale
+    out = _op.tensor.multiply(inexpr, factor)
+    return out
+
+
+def _conver_depth_to_space(inexpr, keras_layer, etab):
+    block_size = keras_layer.scale
+    in_n, in_h, in_w, in_c = keras_layer.input_shape
+
+    new_c = int(in_c / (block_size * block_size))
+    # First expand input to larger dimension.
+    expanded = _op.reshape(
+        inexpr, newshape=(in_n, in_h, in_w, block_size, block_size, new_c))
+    # Now reorder to expand spatial blocks.
+    transposed = _op.transpose(expanded, axes=(0, 1, 3, 2, 4, 5))
+    # Finally reshape to proper output.
+    new_h = in_h * block_size
+    new_w = in_w * block_size
+    newshape = (in_n, new_h, new_w, new_c)
+    out = _op.reshape(transposed, newshape)
+    return out
+
+def _quantized(inexpr, bits):
     x = _op.tensor.clip(inexpr, -1.0, 1)
     x = x + 1
     scale = (2 ** bits - 1) / 2
@@ -258,8 +297,9 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
     is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
     weightList = keras_layer.get_weights()
-    inexpr = quantized(inexpr, 8)
-    weightList = quantized(weightList, 8)
+    bits = keras_layer.bits
+    inexpr = _quantized(inexpr, bits)
+    weightList = _quantized(weightList, bits)
 
     if is_deconv:
         kernel_h, kernel_w, n_filters, in_channels = weightList[0].shape
@@ -319,6 +359,8 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
     return out
+
+#################################################################################################################################
 
 def _convert_convolution(inexpr, keras_layer, etab):
     _check_data_format(keras_layer)
@@ -914,7 +956,11 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 
 _convert_map = {
-    'QConv'                    : _convert_Qconvolution, 
+    'QConv'                    : _convert_Qconvolution,
+    'Normalize'                : _convert_normalize(),
+    'Denormalize'              : _convert_denormalize(),
+    'Depth_to_space'           : _conver_depth_to_space(),
+    'Scale_Layer'              : _convert_scale(),
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
