@@ -957,10 +957,10 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 _convert_map = {
     'QConv'                    : _convert_Qconvolution,
-    'Normalize'                : _convert_normalize(),
-    'Denormalize'              : _convert_denormalize(),
-    'Depth_to_space'           : _conver_depth_to_space(),
-    'Scale_Layer'              : _convert_scale(),
+    'Normalize'                : _convert_normalize,
+    'Denormalize'              : _convert_denormalize,
+    'Depth_to_space'           : _conver_depth_to_space,
+    'Scale_Layer'              : _convert_scale,
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
