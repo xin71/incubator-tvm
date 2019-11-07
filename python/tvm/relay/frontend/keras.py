@@ -350,7 +350,7 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
         out = _op.nn.conv2d(data=inexpr, **params)
     if keras_layer.use_bias:
         bias = etab.new_const(weightList[1])
-        out = _op.nn.bias_add(out, bias)
+        out = _op.nn.bias_add(out, bias, axis=3)
     # defuse activation
     if sys.version_info.major < 3:
         act_type = keras_layer.activation.func_name
