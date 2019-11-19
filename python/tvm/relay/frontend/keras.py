@@ -246,10 +246,22 @@ def _convert_dense(inexpr, keras_layer, etab):
 # Xin's implmentation for SR project
 
 def _convert_normalize(inexpr, keras_layer, etab):
+<<<<<<< HEAD
     x = tvm.relay.expr.const(np.array([0.4488, 0.4371, 0.4040]) * 255, "float32")
     y = tvm.relay.expr.const(127.5, "float32")
     out = _op.tensor.subtract(inexpr, x)
     out = _op.tensor.divide(out, y)
+=======
+    # inexpr = tvm.relay.transpose(inexpr, [0, 3, 1, 2])
+    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32) * 255
+    # Check outbound layers, if they have data format NHWC, then we need to transpose.
+    rgb_mean = _broadcast_np(rgb_mean, 128)
+    x = tvm.relay.expr.const(rgb_mean)
+    y = tvm.relay.expr.const(127.5, "float32")
+    out = (inexpr - x) / y
+    print('Normalzied output: ', type(out))
+    print('===============Finished Normalized Operation =====================')
+>>>>>>> almost working - can output most of the image correctly
     return out
 
 def _convert_denormalize(inexpr, keras_layer, etab):
@@ -268,9 +280,14 @@ def _convert_scale(inexpr, keras_layer, etab):
 def _conver_depth_to_space(inexpr, keras_layer, etab):
     block_size = keras_layer.scale
     in_n, in_h, in_w, in_c = keras_layer.input_shape
+<<<<<<< HEAD
 
     new_c = int(in_c / (block_size * block_size))
     # First expand input to larger dimension.
+=======
+    in_n = 1
+    new_c = int(in_c / (block_size * block_size))
+>>>>>>> almost working - can output most of the image correctly
     expanded = _op.reshape(
         inexpr, newshape=(in_n, in_h, in_w, block_size, block_size, new_c))
     # Now reorder to expand spatial blocks.
@@ -282,11 +299,20 @@ def _conver_depth_to_space(inexpr, keras_layer, etab):
     out = _op.reshape(transposed, newshape)
     return out
 
+<<<<<<< HEAD
 def _quantized(inexpr, bits):
     x = _op.tensor.clip(inexpr, -1.0, 1)
     x = x + 1
     scale = (2 ** bits - 1) / 2
     x = x * scale
+=======
+
+def _quantized_input_tensor(inexpr, bits):
+    x = _op.tensor.clip(inexpr, -1.0, 1.0)
+    x = x + tvm.relay.expr.const(1.0)
+    scale = (2.0 ** bits - 1.0) / 2.0
+    x = x * tvm.relay.expr.const(scale)
+>>>>>>> almost working - can output most of the image correctly
     x = _op.tensor.round(x)
     quantized_x = (((x / 255) - 0.5) * 2)
     return quantized_x
@@ -1117,6 +1143,10 @@ def from_keras(model, shape=None, layout='NCHW'):
     def _convert_input_layer(keras_layer):
         input_name = keras_layer.name
         input_shape = shape[input_name] if shape is not None and input_name in shape else None
+<<<<<<< HEAD
+=======
+        # input_shape = [input_shape[0], input_shape[3], input_shape[1], input_shape[2]] # This is the error!!!!!
+>>>>>>> almost working - can output most of the image correctly
         etab.set_expr(input_name, new_var(input_name, shape=input_shape))
 
     is_tf_keras = _check_model_is_tf_keras()
