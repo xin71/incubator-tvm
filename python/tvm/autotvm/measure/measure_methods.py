@@ -208,8 +208,9 @@ class RPCRunner(Runner):
     def set_task(self, task):
         self.task = task
 
-        if check_remote(task.target, self.key, self.host, self.port):
+        if check_remote(task.target, self.key, self.host, self.port, timeout=self.timeout):
             logger.info("Get devices for measurement successfully!")
+            print(' | Connected Device!')
         else:
             raise RuntimeError("Cannot get remote devices from the tracker. "
                                "Please check the status of tracker by "
