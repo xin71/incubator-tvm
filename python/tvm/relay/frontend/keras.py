@@ -327,7 +327,6 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
         weight = weightList[0].transpose([2, 3, 0, 1])
     else:
         kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
-        print('original kernel shape in CONV2D: ', weightList[0].shape)
         weight = weightList[0].transpose([3, 2, 0, 1])
     if isinstance(keras_layer.dilation_rate, (list, tuple)):
         dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
@@ -399,7 +398,6 @@ def _convert_convolution(inexpr, keras_layer, etab):
         weight = weightList[0].transpose([2, 3, 0, 1])
     else:
         kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
-        # print('original kernel shape in CONV2D: ', weightList[0].shape)
         weight = weightList[0].transpose([3, 2, 0, 1])
     if isinstance(keras_layer.dilation_rate, (list, tuple)):
         dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
@@ -889,7 +887,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
             'Operator {} is not supported for frontend Keras.'.format(op_name))
     outs = _convert_map[op_name](inexpr, keras_layer, etab)
     # print('Infered Value: ', infer_value(outs, keras_layer.get_weights()))
-    # print('Infered Shape: ', infer_shape(outs))
+    print('Infered Shape: ', infer_shape(outs))
     outs = _as_list(outs)
     # if op_name == 'Normalize':
     # print('Infered Value: ', infer_value(outs, ))
@@ -932,11 +930,8 @@ def from_keras(model, shape=None, dtype="float32"):
         etab.set_expr(input_name, var)
 
     etab = ExprTable()
-    print(model)
     for keras_layer in model.layers:
         if isinstance(keras_layer, keras.layers.InputLayer):
-            print("keras layer")
-            print(keras_layer)
             _convert_input_layer(keras_layer)
         else:
             inbound_nodes = keras_layer.inbound_nodes if hasattr(keras_layer, 'inbound_nodes') \
@@ -985,5 +980,4 @@ def from_keras(model, shape=None, dtype="float32"):
     outexpr = outexpr[0] if len(outexpr) == 1 else _expr.Tuple(outexpr)
     func = _expr.Function(analysis.free_vars(outexpr), outexpr)
     params = {k: _nd.array(np.array(v, dtype=dtype)) for k, v in etab.params.items()}
-    # print('params: ', params)
     return _module.Module.from_expr(func), params
