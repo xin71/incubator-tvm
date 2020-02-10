@@ -207,7 +207,7 @@ def _convert_permute(inexpr, keras_layer, _):
 
 def _convert_dense(inexpr, keras_layer, etab):
     weightList = keras_layer.get_weights()
-    weight = etab.new_const(weightList[0].transpose([1, 0]))
+    weight = etab.new_const(weightList[0].transpose([1, 0]),  dtype=str(weightList[0].dtype))
     params = {'weight': weight, 'units': weightList[0].shape[1]}
     input_shape = keras_layer.input_shape
     input_dim = len(input_shape)
@@ -220,7 +220,7 @@ def _convert_dense(inexpr, keras_layer, etab):
         inexpr = _op.squeeze(inexpr, axis=0)
     out = _op.nn.dense(data=inexpr, **params)
     if keras_layer.use_bias:
-        bias = etab.new_const(weightList[1])
+        bias = etab.new_const(weightList[1], dtype=str(weightList[1].dtype))
         out = _op.nn.bias_add(out, bias)
     # defuse activation
     if sys.version_info.major < 3:
@@ -236,31 +236,32 @@ def _convert_dense(inexpr, keras_layer, etab):
 
 #################################################################################################################################
 # Xin's implmentation for SR project
-def _broadcast_np(x, size):
+def _broadcast_np(x, size, dtype):
     x = np.expand_dims(x, axis=0)
     x = np.repeat(x, size * size)
     x = np.reshape(x, (1, 3, size, size))
-    return x
+    return x.astype(dtype)
 
 
 def _convert_normalize(inexpr, keras_layer, etab):
     # inexpr = tvm.relay.transpose(inexpr, [0, 3, 1, 2])
-    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32) * 255
+    dtype = keras_layer.input.dtype.as_numpy_dtype
+    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=dtype) * 255
     # Check outbound layers, if they have data format NHWC, then we need to transpose.
-    rgb_mean = _broadcast_np(rgb_mean, 128)
-    x = tvm.relay.expr.const(rgb_mean)
-    y = tvm.relay.expr.const(127.5, "float32")
+    rgb_mean = _broadcast_np(rgb_mean, 128, dtype=dtype)
+    x = tvm.relay.expr.const(rgb_mean, dtype=dtype)
+    y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = (inexpr - x) / y
-    print('Normalzied output: ', type(out))
     print('===============Finished Normalized Operation =====================')
     return out
 
 
 def _convert_denormalize(inexpr, keras_layer, etab):
-    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32) * 255
-    rgb_mean = _broadcast_np(rgb_mean, 512)
+    dtype = keras_layer.input.dtype.as_numpy_dtype
+    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=dtype) * 255
+    rgb_mean = _broadcast_np(rgb_mean, 512, dtype=dtype)
     x = tvm.relay.expr.const(rgb_mean)
-    y = tvm.relay.expr.const(127.5, "float32")
+    y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = _op.tensor.multiply(inexpr, y)
     out = _op.tensor.add(out, x)
     print('===============Finished Denormalized operation =====================')
@@ -407,7 +408,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
     dilated_kernel_h = (kernel_h - 1) * dilation[0] + 1
     dilated_kernel_w = (kernel_w - 1) * dilation[1] + 1
     stride_h, stride_w = keras_layer.strides
-    params = {'weight': etab.new_const(weight),
+    params = {'weight': etab.new_const(weight, dtype=str(weight.dtype)),
               'kernel_size': [kernel_h, kernel_w],
               'strides': [stride_h, stride_w],
               'dilation': dilation,
@@ -439,7 +440,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
     else:
         out = _op.nn.conv2d(data=inexpr, **params)
     if keras_layer.use_bias:
-        bias = etab.new_const(weightList[1])
+        bias = etab.new_const(weightList[1], dtype=str(weightList[1].dtype))
         out = _op.nn.bias_add(out, bias)
     # defuse activation
     if sys.version_info.major < 3:
@@ -448,7 +449,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-    print('========= Finished QConv=================')
+    print('========= Finished Conv=================')
     return out
 
 
@@ -888,7 +889,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
             'Operator {} is not supported for frontend Keras.'.format(op_name))
     outs = _convert_map[op_name](inexpr, keras_layer, etab)
     # print('Infered Value: ', infer_value(outs, keras_layer.get_weights()))
-    print('Infered Shape: ', infer_shape(outs))
+    # print('Infered Shape: ', infer_shape(outs))
     outs = _as_list(outs)
     # if op_name == 'Normalize':
     # print('Infered Value: ', infer_value(outs, ))
@@ -897,7 +898,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
         etab.set_expr(name, out)
 
 
-def from_keras(model, shape=None):
+def from_keras(model, shape=None, dtype="float32"):
     """Convert keras model to relay Function.
     Parameters
     ----------
@@ -927,11 +928,15 @@ def from_keras(model, shape=None):
         input_name = keras_layer.name
         input_shape = shape[input_name] if shape is not None and input_name in shape else None
         # input_shape = [input_shape[0], input_shape[3], input_shape[1], input_shape[2]] # This is the error!!!!!
-        etab.set_expr(input_name, new_var(input_name, shape=input_shape))
+        var = new_var(input_name, shape=input_shape, dtype=dtype)
+        etab.set_expr(input_name, var)
 
     etab = ExprTable()
+    print(model)
     for keras_layer in model.layers:
         if isinstance(keras_layer, keras.layers.InputLayer):
+            print("keras layer")
+            print(keras_layer)
             _convert_input_layer(keras_layer)
         else:
             inbound_nodes = keras_layer.inbound_nodes if hasattr(keras_layer, 'inbound_nodes') \
@@ -979,5 +984,6 @@ def from_keras(model, shape=None):
                for oc in model._output_coordinates]
     outexpr = outexpr[0] if len(outexpr) == 1 else _expr.Tuple(outexpr)
     func = _expr.Function(analysis.free_vars(outexpr), outexpr)
-    params = {k: _nd.array(np.array(v, dtype=np.float32)) for k, v in etab.params.items()}
+    params = {k: _nd.array(np.array(v, dtype=dtype)) for k, v in etab.params.items()}
+    # print('params: ', params)
     return _module.Module.from_expr(func), params
