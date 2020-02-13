@@ -252,7 +252,7 @@ def _convert_normalize(inexpr, keras_layer, etab):
     x = tvm.relay.expr.const(rgb_mean, dtype=dtype)
     y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = (inexpr - x) / y
-    print('===============Finished Normalized Operation =====================')
+    # print('===============Finished Normalized Operation =====================')
     return out
 
 
@@ -264,21 +264,21 @@ def _convert_denormalize(inexpr, keras_layer, etab):
     y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = _op.tensor.multiply(inexpr, y)
     out = _op.tensor.add(out, x)
-    print('===============Finished Denormalized operation =====================')
+    # print('===============Finished Denormalized operation =====================')
     return out
 
 
 def _convert_scale(inexpr, keras_layer, etab):
     factor = keras_layer.scale
     out = _op.tensor.multiply(inexpr, factor)
-    print('===============Finished Scale Operation =====================')
+    # print('===============Finished Scale Operation =====================')
     return out
 
 
-def _conver_depth_to_space(inexpr, keras_layer, etab):
+def _conver_depth_to_space(inexpr, keras_layer, etab, batch_size):
     block_size = keras_layer.scale
     in_n, in_h, in_w, in_c = keras_layer.input_shape
-    in_n = 1
+    in_n = batch_size
     new_c = int(in_c / (block_size * block_size))
     expanded = _op.reshape(
         inexpr, newshape=(in_n, block_size, block_size, new_c, in_h, in_w))
@@ -287,7 +287,7 @@ def _conver_depth_to_space(inexpr, keras_layer, etab):
     new_w = in_w * block_size
     newshape = (in_n, new_c, new_h, new_w)
     out = _op.reshape(transposed, newshape)
-    print('===============Finished Depth to Space==========================')
+    # print('===============Finished Depth to Space==========================')
     return out
 
 
@@ -376,7 +376,7 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-    print('========= Finished QConv=================')
+    # print('========= Finished QConv=================')
     return out
 
 
@@ -447,7 +447,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-    print('========= Finished Conv=================')
+    # print('========= Finished Conv=================')
     return out
 
 
@@ -864,7 +864,7 @@ def _check_unsupported_layers(model):
             "The following operators are not implemented: {}".format(missing_ops))
 
 
-def keras_op_to_relay(inexpr, keras_layer, outname, etab):
+def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_size):
     """Convert a Keras layer to a Relay expression and update the expression table.
 
     Parameters
@@ -885,9 +885,12 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
     if op_name not in _convert_map:
         raise tvm.error.OpNotImplemented(
             'Operator {} is not supported for frontend Keras.'.format(op_name))
-    outs = _convert_map[op_name](inexpr, keras_layer, etab)
+    if op_name == 'Depth_to_space':
+        outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_size)
+    else:
+        outs = _convert_map[op_name](inexpr, keras_layer, etab)
     # print('Infered Value: ', infer_value(outs, keras_layer.get_weights()))
-    print('Infered Shape: ', infer_shape(outs))
+    # print('Infered Shape: ', infer_shape(outs))
     outs = _as_list(outs)
     # if op_name == 'Normalize':
     # print('Infered Value: ', infer_value(outs, ))
@@ -896,7 +899,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
         etab.set_expr(name, out)
 
 
-def from_keras(model, shape=None, dtype="float32"):
+def from_keras(model, shape=None, dtype="float32", batch_size=1):
     """Convert keras model to relay Function.
     Parameters
     ----------
@@ -971,7 +974,7 @@ def from_keras(model, shape=None, dtype="float32"):
                     inexpr.append(expr)
                 if len(inexpr) == 1:
                     inexpr = inexpr[0]
-                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab)
+                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab, batch_size)
     # model._output_coordinates contains out_node(oc[0]), node_index(oc[1]) and tensor_index(oc[2])
     # Get all output nodes in etab using the name made from above values.
     # The out exprs were added to etab in keras_op_to_relay using this name.
