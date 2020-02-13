@@ -59,12 +59,12 @@ def _as_list(arr):
     return [arr]
 
 
-def _convert_recurrent_activation(inexpr, keras_layer):
+def _convert_recurrent_activation(inexpr, keras_layer, *unused):
     act_type = keras_layer.recurrent_activation.__name__
     return _convert_activation(inexpr, act_type, None)
 
 
-def _convert_activation(inexpr, keras_layer, _):
+def _convert_activation(inexpr, keras_layer, *unused):
     if isinstance(keras_layer, str):
         act_type = keras_layer
     else:
@@ -115,12 +115,12 @@ def _convert_activation(inexpr, keras_layer, _):
         'Operator {} is not supported in frontend Keras.'.format(act_type))
 
 
-def _convert_advanced_activation(inexpr, keras_layer, etab):
+def _convert_advanced_activation(inexpr, keras_layer, etab, batch_shape):
     act_type = type(keras_layer).__name__
 
     if act_type == 'Softmax':
         axis = keras_layer.axis
-        dims = len(keras_layer.input_shape)
+        dims = len(batch_shape)
         if isinstance(axis, list):
             raise tvm.error.OpAttributeUnImplemented(
                 'Softmax with axes {} is not supported.'.format(axis))
@@ -162,7 +162,7 @@ def _convert_advanced_activation(inexpr, keras_layer, etab):
         'Operator {} is not supported in frontend Keras.'.format(act_type))
 
 
-def _convert_merge(inexpr, keras_layer, _):
+def _convert_merge(inexpr, keras_layer, _, batch_shape):
     merge_type = type(keras_layer).__name__
     ret = inexpr[0]
     if merge_type == 'Dot':
@@ -201,15 +201,15 @@ def _convert_merge(inexpr, keras_layer, _):
     return ret
 
 
-def _convert_permute(inexpr, keras_layer, _):
+def _convert_permute(inexpr, keras_layer, _, batch_shape):
     return _op.transpose(inexpr, axes=(0,) + keras_layer.dims)
 
 
-def _convert_dense(inexpr, keras_layer, etab):
+def _convert_dense(inexpr, keras_layer, etab, batch_shape):
     weightList = keras_layer.get_weights()
     weight = etab.new_const(weightList[0].transpose([1, 0]),  dtype=str(weightList[0].dtype))
     params = {'weight': weight, 'units': weightList[0].shape[1]}
-    input_shape = keras_layer.input_shape
+    input_shape = infer_shape(inexpr)
     input_dim = len(input_shape)
     # In case of RNN dense, input shape will be (1, 1, n)
     if input_dim > 2:
@@ -236,19 +236,23 @@ def _convert_dense(inexpr, keras_layer, etab):
 
 #################################################################################################################################
 # Xin's implmentation for SR project
-def _broadcast_np(x, size, dtype):
+def _broadcast_np(x, batch_shape, dtype, denormalize=False):
+    n, c, h, w = batch_shape
+    if denormalize:
+        h = h * 4
+        w = w * 4
     x = np.expand_dims(x, axis=0)
-    x = np.repeat(x, size * size)
-    x = np.reshape(x, (1, 3, size, size))
+    x = np.repeat(x, h * w)
+    x = np.reshape(x, (n, c, h, w))
     return x.astype(dtype)
 
 
-def _convert_normalize(inexpr, keras_layer, etab):
+def _convert_normalize(inexpr, keras_layer, etab, batch_shape):
     # inexpr = tvm.relay.transpose(inexpr, [0, 3, 1, 2])
     dtype = keras_layer.input.dtype.as_numpy_dtype
     rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=dtype) * 255
     # Check outbound layers, if they have data format NHWC, then we need to transpose.
-    rgb_mean = _broadcast_np(rgb_mean, 128, dtype=dtype)
+    rgb_mean = _broadcast_np(rgb_mean, batch_shape, dtype=dtype)
     x = tvm.relay.expr.const(rgb_mean, dtype=dtype)
     y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = (inexpr - x) / y
@@ -256,10 +260,10 @@ def _convert_normalize(inexpr, keras_layer, etab):
     return out
 
 
-def _convert_denormalize(inexpr, keras_layer, etab):
+def _convert_denormalize(inexpr, keras_layer, etab, batch_shape):
     dtype = keras_layer.input.dtype.as_numpy_dtype
     rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=dtype) * 255
-    rgb_mean = _broadcast_np(rgb_mean, 512, dtype=dtype)
+    rgb_mean = _broadcast_np(rgb_mean, batch_shape, dtype=dtype, denormalize=True)
     x = tvm.relay.expr.const(rgb_mean)
     y = tvm.relay.expr.const(127.5, dtype=dtype)
     out = _op.tensor.multiply(inexpr, y)
@@ -268,17 +272,18 @@ def _convert_denormalize(inexpr, keras_layer, etab):
     return out
 
 
-def _convert_scale(inexpr, keras_layer, etab):
+def _convert_scale(inexpr, keras_layer, etab, _):
     factor = keras_layer.scale
     out = _op.tensor.multiply(inexpr, factor)
     # print('===============Finished Scale Operation =====================')
     return out
 
 
-def _conver_depth_to_space(inexpr, keras_layer, etab, batch_size):
+def _conver_depth_to_space(inexpr, keras_layer, etab, batch_shape):
+
     block_size = keras_layer.scale
-    in_n, in_h, in_w, in_c = keras_layer.input_shape
-    in_n = batch_size
+    in_n, _, in_h, in_w = infer_shape(inexpr)
+    in_c = keras_layer.input_shape[-1]
     new_c = int(in_c / (block_size * block_size))
     expanded = _op.reshape(
         inexpr, newshape=(in_n, block_size, block_size, new_c, in_h, in_w))
@@ -311,7 +316,7 @@ def _quantized_weights(weights, bits):
     return quantized_x
 
 
-def _convert_Qconvolution(inexpr, keras_layer, etab):
+def _convert_Qconvolution(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
@@ -349,8 +354,8 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = keras_layer.input_shape[1]
-        in_w = keras_layer.input_shape[2]
+        in_h = infer_shape(inexpr)[1]
+        in_w = infer_shape(inexpr)[2]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -382,7 +387,7 @@ def _convert_Qconvolution(inexpr, keras_layer, etab):
 
 #################################################################################################################################
 
-def _convert_convolution(inexpr, keras_layer, etab):
+def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
@@ -420,8 +425,8 @@ def _convert_convolution(inexpr, keras_layer, etab):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = keras_layer.input_shape[1]
-        in_w = keras_layer.input_shape[2]
+        in_h = infer_shape(inexpr)[1]
+        in_w = infer_shape(inexpr)[2]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -452,7 +457,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
 
 
 
-def _convert_separable_convolution(inexpr, keras_layer, etab):
+def _convert_separable_convolution(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     weightList = keras_layer.get_weights()
     # depthwise conv
@@ -470,8 +475,8 @@ def _convert_separable_convolution(inexpr, keras_layer, etab):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = keras_layer.input_shape[1]
-        in_w = keras_layer.input_shape[2]
+        in_h = infer_shape(inexpr)[1]
+        in_w = infer_shape(inexpr)[2]
         pad_t, pad_b = _get_pad_pair(in_h, kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -507,14 +512,14 @@ def _convert_separable_convolution(inexpr, keras_layer, etab):
     return out
 
 
-def _convert_flatten(inexpr, keras_layer, _):
+def _convert_flatten(inexpr, keras_layer, *unused):
     _check_data_format(keras_layer)
     # NCHW -> NHWC so that dense can be correctly converted
     inexpr = _op.transpose(inexpr, axes=[0, 2, 3, 1])
     return _op.nn.batch_flatten(inexpr)
 
 
-def _convert_pooling(inexpr, keras_layer, etab):
+def _convert_pooling(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     pool_type = type(keras_layer).__name__
     # global pool in keras = global pool + flatten in nnvm/relay
@@ -530,8 +535,8 @@ def _convert_pooling(inexpr, keras_layer, etab):
     if keras_layer.padding == 'valid':
         pass
     elif keras_layer.padding == 'same':
-        in_h = keras_layer.input_shape[1]
-        in_w = keras_layer.input_shape[2]
+        in_h = infer_shape(inexpr)[1]
+        in_w = infer_shape(inexpr)[2]
         pad_t, pad_b = _get_pad_pair(in_h, pool_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, pool_w, stride_w)
         params['padding'] = [pad_t, pad_l, pad_b, pad_r]
@@ -547,7 +552,7 @@ def _convert_pooling(inexpr, keras_layer, etab):
         'Operator {} is not supported for frontend Keras.'.format(keras_layer))
 
 
-def _convert_upsample(inexpr, keras_layer, _):
+def _convert_upsample(inexpr, keras_layer, *unused):
     _check_data_format(keras_layer)
     upsample_type = type(keras_layer).__name__
     params = {}
@@ -582,11 +587,11 @@ def _convert_upsample(inexpr, keras_layer, _):
     return _op.nn.upsampling(inexpr, **params)
 
 
-def _convert_cropping(inexpr, keras_layer, _):
+def _convert_cropping(inexpr, keras_layer, *unused):
     _check_data_format(keras_layer)
     crop_type = type(keras_layer).__name__
     if crop_type == 'Cropping2D':
-        (_, in_h, in_w, _) = keras_layer.input_shape
+        (_, in_h, in_w, _) = infer_shape(inexpr)
         ((crop_t, crop_b), (crop_l, crop_r)) = keras_layer.cropping
     else:
         raise tvm.error.OpNotImplemented(
@@ -596,7 +601,7 @@ def _convert_cropping(inexpr, keras_layer, _):
                              end=[int32_max, int32_max, in_h - crop_b, in_w - crop_r])
 
 
-def _convert_batchnorm(inexpr, keras_layer, etab):
+def _convert_batchnorm(inexpr, keras_layer, etab, *unused):
     params = {'scale': False,
               'center': False,
               'epsilon': keras_layer.epsilon}
@@ -619,7 +624,7 @@ def _convert_batchnorm(inexpr, keras_layer, etab):
     return result
 
 
-def _convert_padding(inexpr, keras_layer, _):
+def _convert_padding(inexpr, keras_layer, *unused):
     _check_data_format(keras_layer)
     padding_type = type(keras_layer).__name__
     padding = keras_layer.padding
@@ -649,14 +654,14 @@ def _convert_padding(inexpr, keras_layer, _):
                       pad_width=((0, 0), (0, 0), (top, bottom), (left, right)))
 
 
-def _convert_concat(inexpr, keras_layer, _):
+def _convert_concat(inexpr, keras_layer, _, batch_shape):
     _check_data_format(keras_layer)
     return _op.concatenate(_as_list(inexpr), axis=1)
 
 
-def _convert_reshape(inexpr, keras_layer, _):
+def _convert_reshape(inexpr, keras_layer, _, batch_shape):
     _check_data_format(keras_layer)
-    inshape = keras_layer.input_shape  # includes batch
+    inshape = infer_shape(inexpr)  # includes batch
     tshape = keras_layer.target_shape  # no batch
     if len(inshape) == 3 and len(tshape) == 1:
         # (?, a, b) -> (-1, ab)
@@ -679,7 +684,7 @@ def _convert_reshape(inexpr, keras_layer, _):
     return _op.reshape(inexpr, newshape=shape)
 
 
-def _convert_lstm(inexpr, keras_layer, etab):
+def _convert_lstm(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     if not isinstance(inexpr, list):
         buf = np.zeros((1, keras_layer.units), 'float32')
@@ -690,7 +695,7 @@ def _convert_lstm(inexpr, keras_layer, etab):
     next_h = inexpr[1]
     next_c = inexpr[2]
     weightList = keras_layer.get_weights()
-    in_shape = tuple(dim if dim else 1 for dim in _as_list(keras_layer.input_shape)[0])
+    in_shape = tuple(dim if dim else 1 for dim in _as_list(batch_shape)[0])
     kernel_weight = etab.new_const(weightList[0].transpose([1, 0]))
     recurrent_weight = etab.new_const(weightList[1].transpose([1, 0]))
     in_bias = etab.new_const(weightList[2])
@@ -704,17 +709,17 @@ def _convert_lstm(inexpr, keras_layer, etab):
         ixh2 = _op.nn.bias_add(_op.nn.dense(next_h, recurrent_weight, units=units), bias=in_bias)
         gate = ixh1 + ixh2
         gates = _op.split(gate, indices_or_sections=4, axis=1)
-        in_gate = _convert_recurrent_activation(gates[0], keras_layer)
-        in_transform = _convert_recurrent_activation(gates[1], keras_layer)
-        next_c = in_transform * next_c + in_gate * _convert_activation(gates[2], keras_layer, None)
-        out_gate = _convert_recurrent_activation(gates[3], keras_layer)
-        next_h = out_gate * _convert_activation(next_c, keras_layer, None)
+        in_gate = _convert_recurrent_activation(gates[0], keras_layer, batch_shape)
+        in_transform = _convert_recurrent_activation(gates[1], keras_layer, _, batch_shape)
+        next_c = in_transform * next_c + in_gate * _convert_activation(gates[2], keras_layer)
+        out_gate = _convert_recurrent_activation(gates[3], keras_layer, _, batch_shape)
+        next_h = out_gate * _convert_activation(next_c, keras_layer)
     out_shape = tuple(dim if dim else 1 for dim in _as_list(keras_layer.output_shape)[0])
     out = _op.reshape(next_h, newshape=out_shape)
     return [out, next_h, next_c]
 
 
-def _convert_simple_rnn(inexpr, keras_layer, etab):
+def _convert_simple_rnn(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     if not isinstance(inexpr, list):
         buf = np.zeros((1, keras_layer.units), 'float32')
@@ -732,13 +737,13 @@ def _convert_simple_rnn(inexpr, keras_layer, etab):
     prev_op = _op.nn.batch_flatten(prev_op)
     ixh2 = _op.nn.dense(prev_op, recurrent_weight, units=units)
     output = ixh + ixh2
-    output = _convert_activation(output, keras_layer, None)
+    output = _convert_activation(output, keras_layer)
     out_shape = tuple(dim if dim else 1 for dim in _as_list(keras_layer.output_shape)[0])
     output = _op.reshape(output, newshape=out_shape)
     return [output, output]
 
 
-def _convert_gru(inexpr, keras_layer, etab):
+def _convert_gru(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
     if not isinstance(inexpr, list):
         buf = np.zeros((1, keras_layer.units), 'float32')
@@ -773,7 +778,7 @@ def _convert_gru(inexpr, keras_layer, etab):
     rec_act_r = _convert_recurrent_activation(x_r + recurrent_r, keras_layer)
     units = keras_layer.units
     recurrent_h = _op.nn.dense(rec_act_r * h_tm1_op, rec_weights[1], units=units)
-    act_hh = _convert_activation(x_h + recurrent_h, keras_layer, None)
+    act_hh = _convert_activation(x_h + recurrent_h, keras_layer)
     # previous and candidate state mixed by update gate
     output = rec_act_z * h_tm1_op + (_expr.const(1., dtype='float32') - rec_act_z) * act_hh
     out_shape = tuple(dim if dim else 1 for dim in _as_list(keras_layer.output_shape)[0])
@@ -864,7 +869,7 @@ def _check_unsupported_layers(model):
             "The following operators are not implemented: {}".format(missing_ops))
 
 
-def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_size):
+def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_shape):
     """Convert a Keras layer to a Relay expression and update the expression table.
 
     Parameters
@@ -885,10 +890,8 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_size):
     if op_name not in _convert_map:
         raise tvm.error.OpNotImplemented(
             'Operator {} is not supported for frontend Keras.'.format(op_name))
-    if op_name == 'Depth_to_space':
-        outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_size)
-    else:
-        outs = _convert_map[op_name](inexpr, keras_layer, etab)
+
+    outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_shape)
     # print('Infered Value: ', infer_value(outs, keras_layer.get_weights()))
     # print('Infered Shape: ', infer_shape(outs))
     outs = _as_list(outs)
@@ -899,7 +902,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_size):
         etab.set_expr(name, out)
 
 
-def from_keras(model, shape=None, dtype="float32", batch_size=1):
+def from_keras(model, shape=None, dtype="float32"):
     """Convert keras model to relay Function.
     Parameters
     ----------
@@ -927,9 +930,9 @@ def from_keras(model, shape=None, dtype="float32", batch_size=1):
 
     def _convert_input_layer(keras_layer):
         input_name = keras_layer.name
-        input_shape = shape[input_name] if shape is not None and input_name in shape else None
+        # input_shape = shape[input_name] if shape is not None and input_name in shape else None
         # input_shape = [input_shape[0], input_shape[3], input_shape[1], input_shape[2]] # This is the error!!!!!
-        var = new_var(input_name, shape=input_shape, dtype=dtype)
+        var = new_var(input_name, shape=shape, dtype=dtype)
         etab.set_expr(input_name, var)
 
     etab = ExprTable()
@@ -974,7 +977,7 @@ def from_keras(model, shape=None, dtype="float32", batch_size=1):
                     inexpr.append(expr)
                 if len(inexpr) == 1:
                     inexpr = inexpr[0]
-                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab, batch_size)
+                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab, shape)
     # model._output_coordinates contains out_node(oc[0]), node_index(oc[1]) and tensor_index(oc[2])
     # Get all output nodes in etab using the name made from above values.
     # The out exprs were added to etab in keras_op_to_relay using this name.
