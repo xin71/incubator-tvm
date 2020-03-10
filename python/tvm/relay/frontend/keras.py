@@ -27,7 +27,8 @@ from .. import op as _op
 from ... import nd as _nd
 from .common import ExprTable, new_var
 from topi.util import get_const_tuple
-from tvm.relay.frontend.common import infer_shape
+from tvm.relay.frontend.common import infer_shape, infer_value
+from tvm.relay.expr import TupleGetItem
 
 __all__ = ['from_keras']
 
@@ -261,6 +262,7 @@ def _convert_normalize(inexpr, keras_layer, etab, batch_shape):
 
 
 def _convert_denormalize(inexpr, keras_layer, etab, batch_shape):
+    # batch_shape = infer_shape(keras_layer)
     dtype = keras_layer.input.dtype.as_numpy_dtype
     rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=dtype) * 255
     rgb_mean = _broadcast_np(rgb_mean, batch_shape, dtype=dtype, denormalize=True)
@@ -293,6 +295,33 @@ def _conver_depth_to_space(inexpr, keras_layer, etab, batch_shape):
     newshape = (in_n, new_c, new_h, new_w)
     out = _op.reshape(transposed, newshape)
     # print('===============Finished Depth to Space==========================')
+    return out
+
+
+def _convert_channel_split(inexpr, keras_layer, etab, batch_shape, alpha):
+    _, in_c, _, _ = infer_shape(inexpr)
+    ip = int(in_c * alpha)
+    out = _op.split(inexpr, (ip,), axis=1)
+    return out[0], out[1]
+    # print('in_c', in_c)
+    # ip = in_c // 2
+    # print('ip: ', ip)
+    # out = _op.split(inexpr, 2, 1)
+    # return out[0], out[1]
+
+def _convert_channel_shuffle_split(inexpr, keras_layer, etab, batch_shape, alpha):
+    _, in_c, _, _ = infer_shape(inexpr)
+    ip = int(in_c / alpha)
+    out = _op.split(inexpr, (ip,), axis=1)
+    return out[0], out[1]
+
+def _convert_channel_shuffle(inexpr, keras_layer, etab, batch_shape, alpha):
+    alpha = int(alpha)
+    in_n, in_c, in_h, in_w = infer_shape(inexpr)
+    channels_per_split = in_c // alpha
+    out = _op.reshape(inexpr, (in_n, alpha, channels_per_split, in_h, in_w))
+    out = _op.transpose(out, axes=(0, 2, 1, 3, 4))
+    out = _op.reshape(out, (in_n, in_c, in_h, in_w))
     return out
 
 
@@ -354,8 +383,8 @@ def _convert_Qconvolution(inexpr, keras_layer, etab, batch_shape):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = infer_shape(inexpr)[1]
-        in_w = infer_shape(inexpr)[2]
+        in_h = infer_shape(inexpr)[2]
+        in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -425,8 +454,8 @@ def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = infer_shape(inexpr)[1]
-        in_w = infer_shape(inexpr)[2]
+        in_h = infer_shape(inexpr)[2]
+        in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -475,8 +504,8 @@ def _convert_separable_convolution(inexpr, keras_layer, etab, batch_shape):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
-        in_h = infer_shape(inexpr)[1]
-        in_w = infer_shape(inexpr)[2]
+        in_h = infer_shape(inexpr)[2]
+        in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, kernel_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, kernel_w, stride_w)
         if pad_t == pad_b and pad_l == pad_r:
@@ -535,8 +564,8 @@ def _convert_pooling(inexpr, keras_layer, etab, batch_shape):
     if keras_layer.padding == 'valid':
         pass
     elif keras_layer.padding == 'same':
-        in_h = infer_shape(inexpr)[1]
-        in_w = infer_shape(inexpr)[2]
+        in_h = infer_shape(inexpr)[2]
+        in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, pool_h, stride_h)
         pad_l, pad_r = _get_pad_pair(in_w, pool_w, stride_w)
         params['padding'] = [pad_t, pad_l, pad_b, pad_r]
@@ -591,7 +620,7 @@ def _convert_cropping(inexpr, keras_layer, *unused):
     _check_data_format(keras_layer)
     crop_type = type(keras_layer).__name__
     if crop_type == 'Cropping2D':
-        (_, in_h, in_w, _) = infer_shape(inexpr)
+        (_, _, in_h, in_w) = infer_shape(inexpr)
         ((crop_t, crop_b), (crop_l, crop_r)) = keras_layer.cropping
     else:
         raise tvm.error.OpNotImplemented(
@@ -676,7 +705,7 @@ def _convert_reshape(inexpr, keras_layer, _, batch_shape):
         # (?, h, w, c) -> (-1, c, H, W)
         # (?, h, w, c) -> (-1, c, hw)
         # (?, hw, c) -> (-1, c, h, w)
-        ch = inshape[-1]
+        ch = inshape[1]
         assert ch == tshape[-1], \
             "Only supports last dimension in target shape being equal to " \
             "the channel number of input tensor."
@@ -792,6 +821,9 @@ def _default_skip(inexpr, keras_layer, _):  # pylint: disable=unused-argument
 
 
 _convert_map = {
+    'Channel_split': _convert_channel_split,
+    'Channel_split_shuffle': _convert_channel_shuffle_split,
+    'Channel_shuffle': _convert_channel_shuffle,
     'QConv': _convert_Qconvolution,
     'Normalize': _convert_normalize,
     'Denormalize': _convert_denormalize,
@@ -869,7 +901,7 @@ def _check_unsupported_layers(model):
             "The following operators are not implemented: {}".format(missing_ops))
 
 
-def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_shape):
+def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_shape, alpha):
     """Convert a Keras layer to a Relay expression and update the expression table.
 
     Parameters
@@ -891,18 +923,29 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_shape):
         raise tvm.error.OpNotImplemented(
             'Operator {} is not supported for frontend Keras.'.format(op_name))
 
-    outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_shape)
+
     # print('Infered Value: ', infer_value(outs, keras_layer.get_weights()))
-    # print('Infered Shape: ', infer_shape(outs))
-    outs = _as_list(outs)
-    # if op_name == 'Normalize':
-    # print('Infered Value: ', infer_value(outs, ))
-    for t_idx, out in enumerate(outs):
-        name = outname + ":" + str(t_idx)
-        etab.set_expr(name, out)
+    if op_name == 'Channel_split' or op_name == 'Channel_split_shuffle' or op_name == 'Channel_shuffle':
+        outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_shape, alpha)
+        if op_name == 'Channel_shuffle':
+            outs = _as_list(outs)
+        for t_idx, out in enumerate(outs):
+            name = outname + ":" + str(t_idx)
+            etab.set_expr(name, out)
+            # print('Name: ', name)
+            # print('Inferred Channel_Split Shape: ', infer_shape(out))
+
+    else:
+        outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_shape)
+        outs = _as_list(outs)
+        for t_idx, out in enumerate(outs):
+            name = outname + ":" + str(t_idx)
+            etab.set_expr(name, out)
+            # print('Name: ', name)
+            # print('Inferred Shape: ', infer_shape(out))
 
 
-def from_keras(model, shape=None, dtype="float32"):
+def from_keras(model, shape=None, dtype="float32", alpha=0.5):
     """Convert keras model to relay Function.
     Parameters
     ----------
@@ -977,7 +1020,7 @@ def from_keras(model, shape=None, dtype="float32"):
                     inexpr.append(expr)
                 if len(inexpr) == 1:
                     inexpr = inexpr[0]
-                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab, shape)
+                keras_op_to_relay(inexpr, keras_layer, keras_layer.name + ':' + str(node_idx), etab, shape, alpha)
     # model._output_coordinates contains out_node(oc[0]), node_index(oc[1]) and tensor_index(oc[2])
     # Get all output nodes in etab using the name made from above values.
     # The out exprs were added to etab in keras_op_to_relay using this name.

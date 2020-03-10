@@ -413,6 +413,25 @@ def infer_shape(inputs):
     out_shapes = get_const_tuple(out_type.checked_type.shape)
     return out_shapes
 
+def infer_value(input_val, params):
+    """A hack for getting the value of an expression by evaluating a
+    portion of the relay graph. This is often needed for functions that
+    whose output shape depends on the value of a tensor.
+    """
+    # pylint: disable=import-outside-toplevel
+    from tvm.contrib import graph_runtime
+    # Check that all free variables have associated parameters.
+    assert all(var.name_hint in params.keys() for var in analysis.free_vars(
+        input_val)), "All inputs to infer must be available in params."
+    func = _expr.Function(analysis.free_vars(input_val), input_val)
+    with tvm.relay.build_config(opt_level=0):
+        graph, lib, params = tvm.relay.build(func, target="llvm", params=params)
+    ctx = tvm.cpu(0)
+    m = graph_runtime.create(graph, lib, ctx)
+    m.set_input(**params)
+    m.run()
+    return m.get_output(0)
+
 def infer_channels(inputs, transpose=False):
     """A hack for getting 'channels' or 'units' since caffe2 does not provide
     these attributes. We check the shape of weights provided to get the number.
