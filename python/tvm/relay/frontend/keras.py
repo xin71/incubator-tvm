@@ -299,19 +299,22 @@ def _conver_depth_to_space(inexpr, keras_layer, etab, batch_shape):
 
 
 def _convert_channel_split(inexpr, keras_layer, etab, batch_shape, alpha):
+    # _, in_c, _, _ = infer_shape(inexpr)
+    # ip = int(in_c * alpha)
+    # out = _op.split(inexpr, (ip,), axis=1)
+    # return out[0], out[1]
     _, in_c, _, _ = infer_shape(inexpr)
-    ip = int(in_c * alpha)
+    ip = int((in_c / alpha) * (alpha-1))
     out = _op.split(inexpr, (ip,), axis=1)
     return out[0], out[1]
-    # print('in_c', in_c)
-    # ip = in_c // 2
-    # print('ip: ', ip)
-    # out = _op.split(inexpr, 2, 1)
-    # return out[0], out[1]
+
 
 def _convert_channel_shuffle_split(inexpr, keras_layer, etab, batch_shape, alpha):
     _, in_c, _, _ = infer_shape(inexpr)
-    ip = int(in_c / alpha)
+    if alpha == 2:
+        ip = int(in_c // alpha)
+    else:
+        ip = int((in_c /alpha) * (alpha-1))
     out = _op.split(inexpr, (ip,), axis=1)
     return out[0], out[1]
 
@@ -430,6 +433,8 @@ def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
     elif is_depthconv:
         kernel_h, kernel_w, in_channels, depth_mult = weightList[0].shape
         weight = weightList[0].transpose([2, 3, 0, 1])
+        if depth_mult != 1:
+            weight = np.reshape(weight, (-1, 1, weight.shape[2], weight.shape[3]))
     else:
         kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
         weight = weightList[0].transpose([3, 2, 0, 1])
@@ -481,8 +486,8 @@ def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-    # print('========= Finished Conv=================')
     return out
+
 
 
 
