@@ -199,6 +199,8 @@ def _convert_merge(inexpr, keras_layer, _, batch_shape):
     else:
         raise tvm.error.OpNotImplemented(
             'Operator {} is not supported in frontend Keras.'.format(merge_type))
+    print('==========Multiply==========')
+    print('out shape: ', infer_shape(ret))
     return ret
 
 
@@ -232,6 +234,8 @@ def _convert_dense(inexpr, keras_layer, etab, batch_shape):
         out = _convert_activation(out, act_type, etab)
     if input_dim > 2:
         out = _op.expand_dims(out, axis=0)
+    print('==========Dense==========')
+    print('out shape: ', infer_shape(out))
     return out
 
 
@@ -303,9 +307,12 @@ def _convert_channel_split(inexpr, keras_layer, etab, batch_shape, alpha):
     # ip = int(in_c * alpha)
     # out = _op.split(inexpr, (ip,), axis=1)
     # return out[0], out[1]
+    print('Start _convert_channel_split_')
     _, in_c, _, _ = infer_shape(inexpr)
     ip = int((in_c / alpha) * (alpha-1))
     out = _op.split(inexpr, (ip,), axis=1)
+    print('First Brnach: ', infer_shape(out[0]))
+    print('Second Brnach: ', infer_shape(out[1]))
     return out[0], out[1]
 
 
@@ -326,6 +333,14 @@ def _convert_channel_shuffle(inexpr, keras_layer, etab, batch_shape, alpha):
     out = _op.transpose(out, axes=(0, 2, 1, 3, 4))
     out = _op.reshape(out, (in_n, in_c, in_h, in_w))
     return out
+
+def _convert_attention_mask(inexpr, keras_layer, etab, batch_shape):
+    xsum = _op.reduce.sum(_op.reduce.sum(inexpr, axis=2, keepdims=True), axis=3, keepdims=True)
+    xshape = infer_shape(xsum)
+    out = inexpr / xsum * tvm.relay.expr.const(xshape[2],dtype='float32') \
+          * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
+    return out
+
 
 
 def _quantized_input_tensor(inexpr, bits):
@@ -386,6 +401,7 @@ def _convert_Qconvolution(inexpr, keras_layer, etab, batch_shape):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
+        print('Got here ---- padding same')
         in_h = infer_shape(inexpr)[2]
         in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
@@ -459,6 +475,7 @@ def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
         pass
     # we insert a separate pad operator
     elif keras_layer.padding == 'same':
+        print('==========Padding Same ==========')
         in_h = infer_shape(inexpr)[2]
         in_w = infer_shape(inexpr)[3]
         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
@@ -486,6 +503,8 @@ def _convert_convolution(inexpr, keras_layer, etab, batch_shape):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
+    print('Conv2D Output Shape: ', infer_shape(out))
+    print('==========Finish Conv2D==========')
     return out
 
 
@@ -717,6 +736,109 @@ def _convert_reshape(inexpr, keras_layer, _, batch_shape):
         shape = (-1, ch) + tshape[:-1]
     return _op.reshape(inexpr, newshape=shape)
 
+def _convert_convolution3d(inexpr, keras_layer, etab, batch_shape):
+    _check_data_format(keras_layer)
+    weightList = keras_layer.get_weights()
+    weight = weightList[0]
+
+    data_layout = 'NDHWC'
+    kernel_layout = 'DHWIO'
+
+    dilation_rate = keras_layer.dilation_rate
+    if isinstance(dilation_rate, (list, tuple)):
+        dilation = [dilation_rate[0], dilation_rate[1], dilation_rate[2]]
+    else:
+        dilation = [dilation_rate, dilation_rate, dilation_rate]
+
+    kernel_d1 = weight.shape[0]
+    kernel_d2 = weight.shape[1]
+    kernel_d3 = weight.shape[2]
+    # in_channels = weight.shape[3]
+    n_filters = weight.shape[4]
+
+    dilated_kernel_d1 = (kernel_d1 - 1) * dilation[0] + 1
+    dilated_kernel_d2 = (kernel_d2 - 1) * dilation[1] + 1
+    dilated_kernel_d3 = (kernel_d3 - 1) * dilation[2] + 1
+    stride_d1, stride_d2, stride_d3 = keras_layer.strides
+    params = {'weight': etab.new_const(weight),
+              'kernel_size': [kernel_d1, kernel_d2, kernel_d3],
+              'strides': [stride_d1, stride_d2, stride_d3],
+              'dilation': dilation,
+              'padding': [0, 0, 0],
+              'data_layout': data_layout,
+              'kernel_layout': kernel_layout}
+    params['channels'] = n_filters
+
+    if keras_layer.padding == 'valid':
+        pass
+    # calculate the padding values
+    elif keras_layer.padding == 'same':
+        in_d1 = keras_layer.input_shape[1]
+        in_d2 = keras_layer.input_shape[2]
+        in_d3 = keras_layer.input_shape[3]
+        pad_d1 = _get_pad_pair(in_d1, dilated_kernel_d1, stride_d1)
+        pad_d2 = _get_pad_pair(in_d2, dilated_kernel_d2, stride_d2)
+        pad_d3 = _get_pad_pair(in_d3, dilated_kernel_d3, stride_d3)
+        params['padding'] = [pad_d1[0], pad_d2[0], pad_d3[0], pad_d1[1], pad_d2[1], pad_d3[1]]
+    else:
+        msg = 'Padding with {} is not supported for operator Convolution ' \
+              'in frontend Keras.'
+        raise tvm.error.OpAttributeUnImplemented(msg.format(keras_layer.padding))
+    out = _op.nn.conv3d(data=inexpr, **params)
+
+    channel_axis = -1
+    if keras_layer.use_bias:
+        bias = etab.new_const(weightList[1])
+        out = _op.nn.bias_add(out, bias, channel_axis)
+
+    # defuse activation
+    if sys.version_info.major < 3:
+        act_type = keras_layer.activation.func_name
+    else:
+        act_type = keras_layer.activation.__name__
+    if act_type != 'linear':
+        out = _convert_activation(out, act_type, etab)
+
+    return out
+
+
+def _convert_pooling3d(inexpr, keras_layer, etab):
+    _check_data_format(keras_layer)
+    pool_type = type(keras_layer).__name__
+
+    if pool_type not in ['MaxPooling3D', 'AveragePooling3D']:
+        raise tvm.error.OpNotImplemented(
+            'Operator {} is not supported for frontend Keras.'.format(keras_layer))
+
+    pool_d1, pool_d2, pool_d3 = keras_layer.pool_size
+    stride_d1, stride_d2, stride_d3 = keras_layer.strides
+    params = {'pool_size': [pool_d1, pool_d2, pool_d3],
+              'strides': [stride_d1, stride_d2, stride_d3],
+              'padding': [0, 0, 0],
+              'layout': etab.data_layout}
+
+    if keras_layer.padding == 'valid':
+        pass
+    elif keras_layer.padding == 'same':
+        in_d1 = keras_layer.input_shape[1]
+        in_d2 = keras_layer.input_shape[2]
+        in_d3 = keras_layer.input_shape[3]
+        pad_d1 = _get_pad_pair(in_d1, pool_d1, stride_d1)
+        pad_d2 = _get_pad_pair(in_d2, pool_d2, stride_d2)
+        pad_d3 = _get_pad_pair(in_d3, pool_d3, stride_d3)
+        params['padding'] = [pad_d1[0], pad_d2[0], pad_d3[0], pad_d1[1], pad_d2[1], pad_d3[1]]
+    else:
+        raise tvm.error.OpAttributeUnImplemented(
+            'Padding with {} is not supported in operator Pooling3D.'.format(keras_layer.padding))
+
+    out = _op.transpose(inexpr, axes=(0, 4, 1, 2, 3))
+    params['layout'] = "NCDHW"
+    if pool_type == 'MaxPooling3D':
+        out = _op.nn.max_pool3d(out, **params)
+    elif pool_type == 'AveragePooling3D':
+        out = _op.nn.avg_pool3d(out, **params)
+
+    return _op.transpose(out, axes=(0, 2, 3, 4, 1))
 
 def _convert_lstm(inexpr, keras_layer, etab, batch_shape):
     _check_data_format(keras_layer)
@@ -826,6 +948,7 @@ def _default_skip(inexpr, keras_layer, _):  # pylint: disable=unused-argument
 
 
 _convert_map = {
+    'Attention_mask': _convert_attention_mask,
     'Channel_split': _convert_channel_split,
     'Channel_split_shuffle': _convert_channel_shuffle_split,
     'Channel_shuffle': _convert_channel_shuffle,
@@ -851,7 +974,9 @@ _convert_map = {
     'Conv2DTranspose': _convert_convolution,
     'DepthwiseConv2D': _convert_convolution,
     'SeparableConv2D': _convert_separable_convolution,
-
+    'Conv3D': _convert_convolution3d,
+    'AveragePooling3D': _convert_pooling3d,
+    'MaxPooling3D': _convert_pooling3d,
     'Flatten': _convert_flatten,
     'Reshape': _convert_reshape,
     'Concatenate': _convert_concat,
@@ -939,7 +1064,12 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab, batch_shape, alpha):
             etab.set_expr(name, out)
             # print('Name: ', name)
             # print('Inferred Channel_Split Shape: ', infer_shape(out))
-
+    elif op_name == 'Dropout':
+        outs = _convert_map[op_name](inexpr, keras_layer, etab)
+        outs = _as_list(outs)
+        for t_idx, out in enumerate(outs):
+            name = outname + ":" + str(t_idx)
+            etab.set_expr(name, out)
     else:
         outs = _convert_map[op_name](inexpr, keras_layer, etab, batch_shape)
         outs = _as_list(outs)
