@@ -242,158 +242,13 @@ def _convert_dense(inexpr, keras_layer, etab):
     if input_dim > 2:
         out = _op.expand_dims(out, axis=0)
     return out
-#################################################################################################################################
-# Xin's implmentation for SR project
 
-def _convert_normalize(inexpr, keras_layer, etab):
-<<<<<<< HEAD
-    x = tvm.relay.expr.const(np.array([0.4488, 0.4371, 0.4040]) * 255, "float32")
-    y = tvm.relay.expr.const(127.5, "float32")
-    out = _op.tensor.subtract(inexpr, x)
-    out = _op.tensor.divide(out, y)
-=======
-    # inexpr = tvm.relay.transpose(inexpr, [0, 3, 1, 2])
-    rgb_mean = np.array([0.4488, 0.4371, 0.4040], dtype=np.float32) * 255
-    # Check outbound layers, if they have data format NHWC, then we need to transpose.
-    rgb_mean = _broadcast_np(rgb_mean, 128)
-    x = tvm.relay.expr.const(rgb_mean)
-    y = tvm.relay.expr.const(127.5, "float32")
-    out = (inexpr - x) / y
-    print('Normalzied output: ', type(out))
-    print('===============Finished Normalized Operation =====================')
->>>>>>> almost working - can output most of the image correctly
-    return out
-
-def _convert_denormalize(inexpr, keras_layer, etab):
-    x = tvm.relay.expr.const(np.array([0.4488, 0.4371, 0.4040]) * 255, "float32")
-    y = tvm.relay.expr.const(127.5, "float32")
-    out = _op.tensor.multiply(inexpr, y)
-    out = _op.tensor.add(out, x)
-    return out
-
-def _convert_scale(inexpr, keras_layer, etab):
-    factor = keras_layer.scale
-    out = _op.tensor.multiply(inexpr, factor)
-    return out
-
-
-def _conver_depth_to_space(inexpr, keras_layer, etab):
-    block_size = keras_layer.scale
-    in_n, in_h, in_w, in_c = keras_layer.input_shape
-<<<<<<< HEAD
-
-    new_c = int(in_c / (block_size * block_size))
-    # First expand input to larger dimension.
-=======
-    in_n = 1
-    new_c = int(in_c / (block_size * block_size))
->>>>>>> almost working - can output most of the image correctly
-    expanded = _op.reshape(
-        inexpr, newshape=(in_n, in_h, in_w, block_size, block_size, new_c))
-    # Now reorder to expand spatial blocks.
-    transposed = _op.transpose(expanded, axes=(0, 1, 3, 2, 4, 5))
-    # Finally reshape to proper output.
-    new_h = in_h * block_size
-    new_w = in_w * block_size
-    newshape = (in_n, new_h, new_w, new_c)
-    out = _op.reshape(transposed, newshape)
-    return out
-
-<<<<<<< HEAD
-def _quantized(inexpr, bits):
-    x = _op.tensor.clip(inexpr, -1.0, 1)
-    x = x + 1
-    scale = (2 ** bits - 1) / 2
-    x = x * scale
-=======
-
-def _quantized_input_tensor(inexpr, bits):
-    x = _op.tensor.clip(inexpr, -1.0, 1.0)
-    x = x + tvm.relay.expr.const(1.0)
-    scale = (2.0 ** bits - 1.0) / 2.0
-    x = x * tvm.relay.expr.const(scale)
->>>>>>> almost working - can output most of the image correctly
-    x = _op.tensor.round(x)
-    quantized_x = (((x / 255) - 0.5) * 2)
-    return quantized_x
-
-
-def _convert_Qconvolution(inexpr, keras_layer, etab):
-    _check_data_format(keras_layer)
-    is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
-    is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
-    weightList = keras_layer.get_weights()
-    bits = keras_layer.bits
-    inexpr = _quantized(inexpr, bits)
-    weightList = _quantized(weightList, bits)
-
-    if is_deconv:
-        kernel_h, kernel_w, n_filters, in_channels = weightList[0].shape
-        weight = weightList[0].transpose([3, 2, 0, 1])
-    elif is_depthconv:
-        kernel_h, kernel_w, in_channels, depth_mult = weightList[0].shape
-        weight = weightList[0].transpose([2, 3, 0, 1])
-    else:
-        kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
-        weight = weightList[0].transpose([3, 2, 0, 1])
-    if isinstance(keras_layer.dilation_rate, (list, tuple)):
-        dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
-    else:
-        dilation = [keras_layer.dilation_rate, keras_layer.dilation_rate]
-    dilated_kernel_h = (kernel_h - 1) * dilation[0] + 1
-    dilated_kernel_w = (kernel_w - 1) * dilation[1] + 1
-    stride_h, stride_w = keras_layer.strides
-    params = {'weight': etab.new_const(weight),
-              'kernel_size': [kernel_h, kernel_w],
-              'strides': [stride_h, stride_w],
-              'dilation': dilation,
-              'padding': [0, 0]}
-    if is_depthconv:
-        params['channels'] = in_channels * depth_mult
-        params['groups'] = in_channels
-    else:
-        params['channels'] = n_filters
-    if keras_layer.padding == 'valid':
-        pass
-    # we insert a separate pad operator
-    elif keras_layer.padding == 'same':
-        in_h = keras_layer.input_shape[1]
-        in_w = keras_layer.input_shape[2]
-        pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
-        pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
-        if pad_t == pad_b and pad_l == pad_r:
-            params['padding'] = (pad_t, pad_l)
-        else:
-            inexpr = _op.nn.pad(data=inexpr, pad_width=(
-                (0, 0), (0, 0), (pad_t, pad_b), (pad_l, pad_r)))
-    else:
-        msg = 'Padding with {} is not supported for operator Convolution ' \
-              'in frontend Keras.'
-        raise tvm.error.OpAttributeUnImplemented(msg.format(keras_layer.padding))
-    if is_deconv:
-        out = _op.nn.conv2d_transpose(data=inexpr, **params)
-    else:
-        out = _op.nn.conv2d(data=inexpr, **params)
-    if keras_layer.use_bias:
-        bias = etab.new_const(weightList[1])
-        out = _op.nn.bias_add(out, bias, axis=3)
-    # defuse activation
-    if sys.version_info.major < 3:
-        act_type = keras_layer.activation.func_name
-    else:
-        act_type = keras_layer.activation.__name__
-    if act_type != 'linear':
-        out = _convert_activation(out, act_type, etab)
-    return out
-
-#################################################################################################################################
 
 def _convert_convolution(inexpr, keras_layer, etab):
     _check_data_format(keras_layer)
     is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
     weightList = keras_layer.get_weights()
-<<<<<<< HEAD
     weight = weightList[0]
     if etab.data_layout == 'NHWC':
         if is_depthconv:
@@ -403,11 +258,6 @@ def _convert_convolution(inexpr, keras_layer, etab):
     else:
         kernel_layout = 'OIHW'
 
-=======
-    # bits = keras_layer.bits
-    # inexpr = _quantized_input_tensor(inexpr, bits)
-    # weightList = [_quantized_weights(weightList[0], bits), _quantized_weights(weightList[1], bits)]
->>>>>>> works fine for regular EDSR and llvm4.0
     if is_deconv:
         kernel_h, kernel_w, n_filters, in_channels = weight.shape
         if kernel_layout == 'OIHW':
@@ -420,13 +270,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
         weight = weight.transpose([3, 2, 0, 1])
     else:
-<<<<<<< HEAD
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
-=======
-        kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
-        # print('original kernel shape in CONV2D: ', weightList[0].shape)
-        weight = weightList[0].transpose([3, 2, 0, 1])
->>>>>>> works fine for regular EDSR and llvm4.0
     if isinstance(keras_layer.dilation_rate, (list, tuple)):
         dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
     else:
@@ -548,73 +392,6 @@ def _convert_convolution3d(inexpr, keras_layer, etab):
         out = _convert_activation(out, act_type, etab)
 
     return out
-
-# def _convert_convolution(inexpr, keras_layer, etab):
-#     _check_data_format(keras_layer)
-#     is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
-#     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
-#     weightList = keras_layer.get_weights()
-#     if is_deconv:
-#         kernel_h, kernel_w, n_filters, in_channels = weightList[0].shape
-#         weight = weightList[0].transpose([3, 2, 0, 1])
-#     elif is_depthconv:
-#         kernel_h, kernel_w, in_channels, depth_mult = weightList[0].shape
-#         weight = weightList[0].transpose([2, 3, 0, 1])
-#     else:
-#         kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
-#         print('original kernel shape in CONV2D: ', weightList[0].shape)
-#         weight = weightList[0].transpose([3, 2, 0, 1])
-#     if isinstance(keras_layer.dilation_rate, (list, tuple)):
-#         dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
-#     else:
-#         dilation = [keras_layer.dilation_rate, keras_layer.dilation_rate]
-#     dilated_kernel_h = (kernel_h - 1) * dilation[0] + 1
-#     dilated_kernel_w = (kernel_w - 1) * dilation[1] + 1
-#     stride_h, stride_w = keras_layer.strides
-#     params = {'weight': etab.new_const(weight),
-#               'kernel_size': [kernel_h, kernel_w],
-#               'strides': [stride_h, stride_w],
-#               'dilation': dilation,
-#               'padding': [0, 0]}
-#     if is_depthconv:
-#         params['channels'] = in_channels * depth_mult
-#         params['groups'] = in_channels
-#     else:
-#         params['channels'] = n_filters
-#     if keras_layer.padding == 'valid':
-#         pass
-#     # we insert a separate pad operator
-#     elif keras_layer.padding == 'same':
-#         in_h = keras_layer.input_shape[1]
-#         in_w = keras_layer.input_shape[2]
-#         pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
-#         pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
-#         if pad_t == pad_b and pad_l == pad_r:
-#             params['padding'] = (pad_t, pad_l)
-#         else:
-#             inexpr = _op.nn.pad(data=inexpr, pad_width=(
-#                 (0, 0), (0, 0), (pad_t, pad_b), (pad_l, pad_r)))
-#     else:
-#         msg = 'Padding with {} is not supported for operator Convolution ' \
-#               'in frontend Keras.'
-#         raise tvm.error.OpAttributeUnImplemented(msg.format(keras_layer.padding))
-#     if is_deconv:
-#         out = _op.nn.conv2d_transpose(data=inexpr, **params)
-#     else:
-#         out = _op.nn.conv2d(data=inexpr, **params)
-#     if keras_layer.use_bias:
-#         bias = etab.new_const(weightList[1])
-#         out = _op.nn.bias_add(out, bias)
-#     # defuse activation
-#     if sys.version_info.major < 3:
-#         act_type = keras_layer.activation.func_name
-#     else:
-#         act_type = keras_layer.activation.__name__
-#     if act_type != 'linear':
-#         out = _convert_activation(out, act_type, etab)
-#     print('========= Finished Con2D=================')
-#     return out
-
 
 def _convert_separable_convolution(inexpr, keras_layer, etab):
     _check_data_format(keras_layer)
@@ -1061,11 +838,6 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 
 _convert_map = {
-    'QConv'                    : _convert_Qconvolution,
-    'Normalize'                : _convert_normalize,
-    'Denormalize'              : _convert_denormalize,
-    'Depth_to_space'           : _conver_depth_to_space,
-    'Scale_Layer'              : _convert_scale,
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
@@ -1208,24 +980,10 @@ def from_keras(model, shape=None, layout='NCHW'):
     """
     def _check_model_is_tf_keras():
         return type(model).__module__.startswith("tensorflow.python.keras")
-    try:
-        from tensorflow.python import keras
-    except ImportError:
-        raise ImportError('Keras must be installed')
-    assert isinstance(model, keras.engine.training.Model)
-    if keras.backend.backend() != 'tensorflow':
-        raise ValueError("Keras frontend currently supports tensorflow backend only.")
-    if keras.backend.image_data_format() != 'channels_last':
-        raise ValueError("Keras frontend currently supports data_format = channels_last only.")
-    _check_unsupported_layers(model)
 
     def _convert_input_layer(keras_layer):
         input_name = keras_layer.name
         input_shape = shape[input_name] if shape is not None and input_name in shape else None
-<<<<<<< HEAD
-=======
-        # input_shape = [input_shape[0], input_shape[3], input_shape[1], input_shape[2]] # This is the error!!!!!
->>>>>>> almost working - can output most of the image correctly
         etab.set_expr(input_name, new_var(input_name, shape=input_shape))
 
     is_tf_keras = _check_model_is_tf_keras()
