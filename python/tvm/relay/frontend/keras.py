@@ -27,6 +27,8 @@ from .. import function as _function
 from .. import op as _op
 from ... import nd as _nd
 from .common import ExprTable, new_var
+import tensorflow.keras as keras
+import tensorflow as tf
 
 __all__ = ['from_keras']
 
@@ -243,6 +245,93 @@ def _convert_dense(inexpr, keras_layer, etab):
         out = _op.expand_dims(out, axis=0)
     return out
 
+
+def quantize(x, bits):
+    x = tf.clip_by_value(x, -1, 1)  # -1 and 1 can be changed
+    x = x + 1
+    scale = (2 ** bits - 1) / 2
+    x = x * scale
+    x = _smooth_round(x)  # this is not differiable
+    quantized_x = (((x / 255) - 0.5) * 2)
+    return quantized_x
+
+
+def quantized(inexpr, bits):
+    x = _op.tensor.clip(inexpr, -1.0, 1)
+    x = x + 1
+    scale = (2 ** bits - 1) / 2
+    x = x * scale
+    x = _op.tensor.round(x)
+    quantized_x = (((x / 255) - 0.5) * 2)
+    return quantized_x
+
+
+def _convert_Qconvolution(inexpr, keras_layer, etab):
+    _check_data_format(keras_layer)
+    is_deconv = type(keras_layer).__name__ == 'Conv2DTranspose'
+    is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
+    weightList = keras_layer.get_weights()
+    inexpr = quantized(inexpr, 8)
+    weightList = quantized(weightList, 8)
+    
+    if is_deconv:
+        kernel_h, kernel_w, n_filters, in_channels = weightList[0].shape
+        weight = weightList[0].transpose([3, 2, 0, 1])
+    elif is_depthconv:
+        kernel_h, kernel_w, in_channels, depth_mult = weightList[0].shape
+        weight = weightList[0].transpose([2, 3, 0, 1])
+    else:
+        kernel_h, kernel_w, in_channels, n_filters = weightList[0].shape
+        weight = weightList[0].transpose([3, 2, 0, 1])
+    if isinstance(keras_layer.dilation_rate, (list, tuple)):
+        dilation = [keras_layer.dilation_rate[0], keras_layer.dilation_rate[1]]
+    else:
+        dilation = [keras_layer.dilation_rate, keras_layer.dilation_rate]
+    dilated_kernel_h = (kernel_h - 1) * dilation[0] + 1
+    dilated_kernel_w = (kernel_w - 1) * dilation[1] + 1
+    stride_h, stride_w = keras_layer.strides
+    params = {'weight': etab.new_const(weight),
+              'kernel_size': [kernel_h, kernel_w],
+              'strides': [stride_h, stride_w],
+              'dilation': dilation,
+              'padding': [0, 0]}
+    if is_depthconv:
+        params['channels'] = in_channels * depth_mult
+        params['groups'] = in_channels
+    else:
+        params['channels'] = n_filters
+    if keras_layer.padding == 'valid':
+        pass
+    # we insert a separate pad operator
+    elif keras_layer.padding == 'same':
+        in_h = keras_layer.input_shape[1]
+        in_w = keras_layer.input_shape[2]
+        pad_t, pad_b = _get_pad_pair(in_h, dilated_kernel_h, stride_h)
+        pad_l, pad_r = _get_pad_pair(in_w, dilated_kernel_w, stride_w)
+        if pad_t == pad_b and pad_l == pad_r:
+            params['padding'] = (pad_t, pad_l)
+        else:
+            inexpr = _op.nn.pad(data=inexpr, pad_width=(
+                (0, 0), (0, 0), (pad_t, pad_b), (pad_l, pad_r)))
+    else:
+        msg = 'Padding with {} is not supported for operator Convolution ' \
+              'in frontend Keras.'
+        raise tvm.error.OpAttributeUnImplemented(msg.format(keras_layer.padding))
+    if is_deconv:
+        out = _op.nn.conv2d_transpose(data=inexpr, **params)
+    else:
+        out = _op.nn.conv2d(data=inexpr, **params)
+    if keras_layer.use_bias:
+        bias = etab.new_const(weightList[1])
+        out = _op.nn.bias_add(out, bias)
+    # defuse activation
+    if sys.version_info.major < 3:
+        act_type = keras_layer.activation.func_name
+    else:
+        act_type = keras_layer.activation.__name__
+    if act_type != 'linear':
+        out = _convert_activation(out, act_type, etab)
+    return out
 
 def _convert_convolution(inexpr, keras_layer, etab):
     _check_data_format(keras_layer)
@@ -980,6 +1069,16 @@ def from_keras(model, shape=None, layout='NCHW'):
     """
     def _check_model_is_tf_keras():
         return type(model).__module__.startswith("tensorflow.python.keras")
+    try:
+        import keras
+    except ImportError:
+        raise ImportError('Keras must be installed')
+    assert isinstance(model, keras.models.Model)
+    if keras.backend.backend() != 'tensorflow':
+        raise ValueError("Keras frontend currently supports tensorflow backend only.")
+    if keras.backend.image_data_format() != 'channels_last':
+        raise ValueError("Keras frontend currently supports data_format = channels_last only.")
+    _check_unsupported_layers(model)
 
     def _convert_input_layer(keras_layer):
         input_name = keras_layer.name
