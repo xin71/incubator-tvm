@@ -27,6 +27,7 @@ from .. import function as _function
 from .. import op as _op
 from ... import nd as _nd
 from .common import ExprTable, new_var
+from tvm.relay.frontend.common import infer_shape
 
 __all__ = ['from_keras']
 
@@ -56,6 +57,15 @@ def _as_list(arr):
     if isinstance(arr, list):
         return arr
     return [arr]
+
+
+def _convert_attention_mask(inexpr, keras_layer, etab):
+    print('converting attention!')
+    xsum = _op.reduce.sum(_op.reduce.sum(inexpr, axis=2, keepdims=True), axis=3, keepdims=True)
+    xshape = infer_shape(xsum)
+    out = inexpr / xsum * tvm.relay.expr.const(xshape[2], dtype='float32') \
+          * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
+    return out
 
 
 def _convert_recurrent_activation(inexpr, keras_layer):
@@ -239,13 +249,17 @@ def _convert_convolution(inexpr, keras_layer, etab):
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
     weightList = keras_layer.get_weights()
     weight = weightList[0]
+    print('etab.data_layout', etab.data_layout)
     if etab.data_layout == 'NHWC':
+        print('Got here NHWC!')
         if is_depthconv:
             kernel_layout = 'HWOI'
         else:
             kernel_layout = 'HWIO'
     else:
+        print('got here kernel layout OIHW')
         kernel_layout = 'OIHW'
+
 
     if is_deconv:
         kernel_h, kernel_w, n_filters, in_channels = weight.shape
@@ -257,6 +271,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
             weight = weight.transpose([2, 3, 0, 1])
     elif etab.data_layout == 'NCHW':
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
+        print('weight.shape', weight.shape)
         weight = weight.transpose([3, 2, 0, 1])
     else:
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
@@ -267,7 +282,7 @@ def _convert_convolution(inexpr, keras_layer, etab):
     dilated_kernel_h = (kernel_h - 1) * dilation[0] + 1
     dilated_kernel_w = (kernel_w - 1) * dilation[1] + 1
     stride_h, stride_w = keras_layer.strides
-    params = {'weight': etab.new_const(weight),
+    params = {'weight': etab.new_const(weight, dtype=str(weight.dtype)),
               'kernel_size': [kernel_h, kernel_w],
               'strides': [stride_h, stride_w],
               'dilation': dilation,
@@ -318,6 +333,8 @@ def _convert_convolution(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
+    print('output shape: ', infer_shape(out))
+    print('finish convolution 2D')
     return out
 
 def _convert_convolution3d(inexpr, keras_layer, etab):
@@ -843,6 +860,7 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 
 _convert_map = {
+    'Attention_mask': _convert_attention_mask,
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
@@ -957,7 +975,7 @@ def keras_op_to_relay(inexpr, keras_layer, outname, etab):
         etab.set_expr(name, out)
 
 
-def from_keras(model, shape=None, layout='NCHW'):
+def from_keras(model, shape=None, layout='NCHW', dtype='float32'):
     """Convert keras model to relay Function.
 
     Parameters
@@ -986,8 +1004,10 @@ def from_keras(model, shape=None, layout='NCHW'):
 
     def _convert_input_layer(keras_layer):
         input_name = keras_layer.name
-        input_shape = shape[input_name] if shape is not None and input_name in shape else None
-        etab.set_expr(input_name, new_var(input_name, shape=input_shape))
+        # input_shape = shape[input_name] if shape is not None and input_name in shape else None
+        var = new_var(input_name, shape=shape, dtype=dtype)
+        # etab.set_expr(input_name, new_var(input_name, shape=input_shape))
+        etab.set_expr(input_name, var)
 
     is_tf_keras = _check_model_is_tf_keras()
 
