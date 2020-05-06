@@ -242,8 +242,6 @@ void CodeGenCUDA::PrintVecBinaryOp(
   this->PrintType(t, stream);
   stream << ' ' << sret << ";\n";
   {
-    EnterScopeRAII scope(this);
-
     // Unpack into individual ops.
     std::string vlhs = SSAGetID(PrintExpr(lhs), lhs.dtype());
     std::string vrhs = SSAGetID(PrintExpr(rhs), rhs.dtype());
@@ -274,9 +272,17 @@ void CodeGenCUDA::PrintVecElemLoad(
   static const char access[] = {'x', 'y', 'z', 'w'};
   CHECK(i >= 0 && i < (t.is_float16() ? 8 : 4));
   if ((t.is_int()) && t.bits() == 8) {
-    os << "((char)(" << vec << " >> " << i * 8 << "))";
+    if (t.lanes() == 2 || t.lanes() == 3) {
+      os << vec << "." << access[i % t.lanes()];
+    } else {
+      os << "((char)(" << vec << " >> " << i * 8 << "))";
+    }
   } else if ((t.is_uint()) && t.bits() == 8) {
-    os << "((unsigned char)(" << vec << " >> " << i * 8 << "))";
+    if (t.lanes() == 2 || t.lanes() == 3) {
+      os << vec << "." << access[i % t.lanes()];
+    } else {
+      os << "((unsigned char)(" << vec << " >> " << i * 8 << "))";
+    }
   } else if (t.is_float16()) {
     os << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
        << access[i % 2];
@@ -291,12 +297,17 @@ void CodeGenCUDA::PrintVecElemStore(
   static const char access[] = {'x', 'y', 'z', 'w'};
   CHECK(i >= 0 && i < (t.is_float16() ? 8 : 4));
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-    stream << vec << "=";
-    // Do not read the first undef lane.
-    if (i != 0) {
-      stream << vec << " & ~(0x000000ff << " << i * 8 << ") |";
+    if (t.lanes() == 2 || t.lanes() == 3) {
+      stream << vec << '.' << access[i % t.lanes()] << "="
+             << "(" << value << ");\n";
+    } else {
+      stream << vec << "=";
+      // Do not read the first undef lane.
+      if (i != 0) {
+        stream << vec << " & ~(0x000000ff << " << i * 8 << ") |";
+      }
+      stream << "(" << value << " << " << i * 8 << ");\n";
     }
-    stream << "(" << value << " << " << i * 8 << ");\n";
   } else if (t.is_float16()) {
     stream << "((half2*)(&(" << vec << "." << access[i / 2] << ")))->"
            << access[i % 2] << " = " << value << ";\n";
@@ -350,7 +361,7 @@ void CodeGenCUDA::PrintStorageScope(
     const std::string& scope, std::ostream& os) { // NOLINT(*)
   CHECK_NE(scope, "global");
   if (scope == "shared") {
-    os << "__shared__";
+    os << "__shared__ ";
   }
 }
 
@@ -370,7 +381,6 @@ void CodeGenCUDA::VisitExpr_(const CastNode* op, std::ostream& os) {
   this->PrintType(target_ty, stream);
   stream << ' ' << sret << ";\n";
   {
-    EnterScopeRAII scope(this);
     std::string src = SSAGetID(PrintExpr(op->value), from_ty);
     for (int i = 0, lanes = from_ty.lanes(); i < lanes; ++i) {
       std::ostringstream val;
@@ -470,8 +480,6 @@ void CodeGenCUDA::VisitExpr_(const CallNode *op, std::ostream& os) {
     this->PrintType(op->dtype, stream);
     stream << ' ' << sret << ";\n";
     {
-      EnterScopeRAII scope(this);
-
       // Load arguments.
       std::vector<std::string> sargs;
       for (size_t i = 0; i < op->args.size(); ++i) {
@@ -514,51 +522,43 @@ void CodeGenCUDA::VisitStmt_(const AttrStmtNode* op) {
 void CodeGenCUDA::VisitStmt_(const AllocateNode* op) {
   CHECK(!is_zero(op->condition));
   std::string vid = AllocVarID(op->buffer_var.get());
-  if (op->new_expr.defined()) {
-    // Prefer global static allocation for the program
-    CHECK_EQ(op->free_function, "nop");
-    std::string new_data = PrintExpr(op->new_expr);
-    this->PrintIndent();
-    PrintType(op->dtype, stream);
-    stream << "* "<< vid << '=' << new_data << ";\n";
-  } else {
-    this->PrintIndent();
-    int32_t constant_size = op->constant_allocation_size();
-    CHECK_GT(constant_size, 0)
-      << "Can only handle constant size stack allocation for now";
-    const VarNode* buffer = op->buffer_var.as<VarNode>();
-    std::string scope = alloc_storage_scope_.at(buffer);
-    if (scope.find("wmma.") == 0) {
-      if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
-        CHECK(op->dtype == DataType::Float(16) ||
-              op->dtype == DataType::Int(8) ||
-              op->dtype == DataType::UInt(8) ||
-              op->dtype == DataType::Int(4) ||
-              op->dtype == DataType::UInt(4) ||
-              op->dtype == DataType::Int(1))
-          << "Matrix_a and matrix_b only support half or char or unsigned char "
-          << "or uint4 or int4 or int1 type for now";
-      } else {
-        CHECK(op->dtype == DataType::Float(16) ||
-              op->dtype == DataType::Float(32) ||
-              op->dtype == DataType::Int(32))
-          << "Accumulator only support half, float and int type for now";
-      }
-      constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
-      PrintWmmaScope(scope, op->dtype, buffer, stream);
+
+  this->PrintIndent();
+  int32_t constant_size = op->constant_allocation_size();
+  CHECK_GT(constant_size, 0)
+    << "Can only handle constant size stack allocation for now";
+  const VarNode* buffer = op->buffer_var.as<VarNode>();
+  std::string scope = alloc_storage_scope_.at(buffer);
+  if (scope.find("wmma.") == 0) {
+    if (scope == "wmma.matrix_a" || scope == "wmma.matrix_b") {
+      CHECK(op->dtype == DataType::Float(16) ||
+            op->dtype == DataType::Int(8) ||
+            op->dtype == DataType::UInt(8) ||
+            op->dtype == DataType::Int(4) ||
+            op->dtype == DataType::UInt(4) ||
+            op->dtype == DataType::Int(1))
+        << "Matrix_a and matrix_b only support half or char or unsigned char "
+        << "or uint4 or int4 or int1 type for now";
     } else {
-      PrintStorageScope(scope, stream);
-      stream << ' ';
-      PrintType(op->dtype, stream);
+      CHECK(op->dtype == DataType::Float(16) ||
+            op->dtype == DataType::Float(32) ||
+            op->dtype == DataType::Int(32))
+        << "Accumulator only support half, float and int type for now";
     }
-    if ((op->dtype == DataType::Int(4) ||
-         op->dtype == DataType::UInt(4) ||
-         op->dtype == DataType::Int(1)) && scope == "shared") {
-      constant_size = constant_size / (32 / op->dtype.bits());
-    }
-    stream << ' '<< vid << '['
-           << constant_size << "];\n";
+    constant_size = GetWmmaFragmentSize(scope, buffer, constant_size);
+    PrintWmmaScope(scope, op->dtype, buffer, stream);
+  } else {
+    PrintStorageScope(scope, stream);
+    PrintType(op->dtype, stream);
   }
+  if ((op->dtype == DataType::Int(4) ||
+        op->dtype == DataType::UInt(4) ||
+        op->dtype == DataType::Int(1)) && scope == "shared") {
+    constant_size = constant_size / (32 / op->dtype.bits());
+  }
+  stream << ' '<< vid << '['
+          << constant_size << "];\n";
+
   RegisterHandleType(op->buffer_var.get(), op->dtype);
   this->PrintStmt(op->body);
 }
@@ -664,8 +664,6 @@ void CodeGenCUDA::VisitExpr_(const SelectNode* op, std::ostream &os) {
   this->PrintType(op->dtype, stream);
   stream << ' ' << r_var << ";\n";
   {
-    EnterScopeRAII scope(this);
-
     std::string c_var = SSAGetID(PrintExpr(op->condition), op->dtype);
     std::string t_var = SSAGetID(PrintExpr(op->true_value), op->dtype);
     std::string f_var = SSAGetID(PrintExpr(op->false_value), op->dtype);
@@ -804,11 +802,13 @@ void CodeGenCUDA::PrintVecElemLoadExpr(
     DataType t, int i, const std::string& value, std::ostream& os) {
   CHECK_GT(t.lanes(), 1);
   if (t.bits() == 8 && (t.is_int() || t.is_uint())) {
-    if (i != 0) {
-      os << "|";
+    if (!(t.lanes() == 2 || t.lanes() == 3)) {
+      if (i != 0) {
+        os << "|";
+      }
+      os << "((0x000000ff << " << i * 8 << ") & (" << value << " << " << i * 8   << "))";
+      return;
     }
-    os << "((0x000000ff << " << i * 8 << ") & (" << value << " << " << i * 8 << "))";
-    return;
   }
 
   if (t.is_float16()) {

@@ -132,11 +132,23 @@ def _elemwise(name):
         return get_relay_op(name)(data0, data1)
     return _impl
 
-def _abs():
+
+def _unary(name):
     def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.abs(data)
+        input_type = input_types[0]
+        data = _convert_elemwise_input(inputs[0], input_type)
+
+        return get_relay_op(name)(data)
     return _impl
+
+
+def _log1p():
+    def _impl(inputs, input_types):
+        # 1_plus_log x = log(x + 1)
+        one = _expr.const(1, dtype="float32")
+        return _op.log(inputs[0] + one)
+    return _impl
+
 
 def _arange():
     def _impl(inputs, input_types):
@@ -272,6 +284,31 @@ def _select():
         return _op.transform.take(data, index, axis=dim)
     return _impl
 
+def _take():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        indices = _op.cast(inputs[1], "int32")
+
+        return _op.transform.take(data, indices=indices)
+    return _impl
+
+def _topk():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        k = int(inputs[1])
+        axis = int(inputs[2])
+        is_ascend = not bool(inputs[3])
+        sort = bool(inputs[4])
+
+        if not sort:
+            msg = "Currently supports only sorted output for topk operator."
+            raise AssertionError(msg)
+
+        outs = _op.topk(data, k=k, axis=axis, is_ascend=is_ascend, ret_type="both")
+
+        return outs[0], outs[1]
+    return _impl
+
 def _reciprocal():
     def _impl(inputs, input_types):
         data = inputs[0]
@@ -300,6 +337,40 @@ def _repeat_interleave():
         return _op.transform.repeat(data, repeats=repeats, axis=axis)
     return _impl
 
+
+def _addcdiv():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        c = _expr.const(inputs[3])
+        t1 = inputs[1]
+        t2 = inputs[2]
+
+        return data + (c * (t1 / t2))
+    return _impl
+
+
+def _addcmul():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        c = _expr.const(inputs[3])
+        t1 = inputs[1]
+        t2 = inputs[2]
+
+        return data + (c * (t1 * t2))
+    return _impl
+
+
+def _where():
+    def _impl(inputs, input_types):
+        cond = inputs[0]
+        x = inputs[1]
+        y = inputs[2]
+
+        return _op.where(cond, x, y)
+
+    return _impl
+
+
 def _ones():
     def _impl(inputs, input_types):
         data = inputs[0]
@@ -315,11 +386,24 @@ def _ones():
             msg = "Data type %s could not be parsed in ones op" % (type(data))
             raise AssertionError(msg)
 
-        dtype_map = {6: "float32", 3: "int32"}
-        dtype_id = inputs[1]
-        assert dtype_id in dtype_map, "Unsupported dtype %d" % dtype_id
-        return _op.full(_expr.const(1), shape, dtype=dtype_map[dtype_id])
+        dtype = _convert_data_type(_convert_dtype_value(inputs[1]))
+
+        return _op.full(_expr.const(1), shape, dtype=dtype)
     return _impl
+
+def _ones_like():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        out = _op.ones_like(data)
+
+        # If the input and the output datatype is different, do a cast
+        dtype = _convert_data_type(_convert_dtype_value(inputs[1]))
+        if input_types[0] not in dtype:
+            out = _op.cast(out, dtype)
+
+        return out
+    return _impl
+
 
 def _zeros():
     def _impl(inputs, input_types):
@@ -336,11 +420,87 @@ def _zeros():
             msg = "Data type %s could not be parsed in zeros op" % (type(data))
             raise AssertionError(msg)
 
-        dtype_map = {6: "float32", 3: "int32"}
-        dtype_id = inputs[1]
-        assert dtype_id in dtype_map, "Unsupported dtype %d" % dtype_id
-        return _op.full(_expr.const(0), shape, dtype=dtype_map[dtype_id])
+        dtype = _convert_data_type(_convert_dtype_value(inputs[1]))
+
+        return _op.full(_expr.const(0), shape, dtype=dtype)
     return _impl
+
+
+def _zeros_like():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        out = _op.zeros_like(data)
+
+        # If the input and the output datatype is different, do a cast
+        dtype = _convert_data_type(_convert_dtype_value(inputs[1]))
+        if input_types[0] not in dtype:
+            out = _op.cast(out, dtype)
+
+        return out
+    return _impl
+
+
+def _full():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+
+        fill_value = inputs[1]
+        import torch
+        if isinstance(data, _expr.Expr):
+            shape = _infer_shape(data)
+        elif isinstance(data, list):
+            shape = data
+        elif isinstance(data, (torch.Tensor, np.ndarray)):
+            shape = data.shape
+        else:
+            msg = "Data type %s could not be parsed in zeros op" % (type(data))
+            raise AssertionError(msg)
+
+        dtype = _convert_data_type(_convert_dtype_value(inputs[2]))
+
+        return _op.full(_expr.const(fill_value), shape, dtype=dtype)
+    return _impl
+
+def _full_like():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        fill_value = inputs[1]
+
+        out = _op.full_like(data, _expr.const(fill_value))
+
+        # If the input and the output datatype is different, do a cast
+        dtype = _convert_data_type(_convert_dtype_value(inputs[2]))
+        if input_types[0] not in dtype:
+            out = _op.cast(out, dtype)
+
+        return out
+    return _impl
+
+
+def _linspace():
+    def _impl(inputs, input_types):
+        start = inputs[0]
+        stop = inputs[1]
+        step = inputs[2]
+
+        # Find the spacing between values as step
+        if step != 1:
+            step = (stop - start) / (step - 1)
+            stop = stop + step
+        else:
+            stop = start + step
+
+        dtype = "float" if "float" in input_types[0:3] else _convert_dtype_value(inputs[3])
+        start = _create_typed_const(start, dtype)
+        stop = _create_typed_const(stop, dtype)
+        step = _create_typed_const(step, dtype)
+
+        return _op.transform.arange(start=start,
+                                    stop=stop,
+                                    step=step,
+                                    dtype=_convert_data_type(dtype))
+    return _impl
+
 
 def _relu():
     def _impl(inputs, input_types):
@@ -709,6 +869,26 @@ def _layer_norm():
                                  scale=True)
     return _impl
 
+
+def _group_norm():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+        gamma = inputs[2]
+        beta = inputs[3]
+        num_groups = inputs[1]
+        epsilon = float(inputs[4])
+
+        return _op.nn.group_norm(data,
+                                 gamma=gamma,
+                                 beta=beta,
+                                 num_groups=num_groups,
+                                 axis=1,
+                                 epsilon=epsilon,
+                                 center=True,
+                                 scale=True)
+    return _impl
+
+
 def _transpose(prelude):
     def _impl(inputs, input_types):
         data = inputs[0]
@@ -743,7 +923,7 @@ def _transpose(prelude):
             axes[src] = dst
             axes[dst] = src
         else:
-            axes = inputs[1]
+            axes = _infer_shape(inputs[1], prelude.mod)
         return _op.transform.transpose(data, axes)
     return _impl
 
@@ -1112,48 +1292,13 @@ def _pad():
         return _op.nn.pad(data, pad_width, pad_value)
     return _impl
 
-def _sqrt():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.tensor.sqrt(data)
-    return _impl
-
-
-def _rsqrt():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.tensor.rsqrt(data)
-    return _impl
-
-
-def _ceil():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.ceil(data)
-    return _impl
-
 
 def _clamp():
     def _impl(inputs, input_types):
-        print(inputs, input_types)
         data = inputs[0]
         amin = inputs[1] if inputs[1] else np.finfo(np.float32).min
         amax = inputs[2] if inputs[2] else np.finfo(np.float32).max
         return _op.clip(data, amin, amax)
-    return _impl
-
-
-def _floor():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.floor(data)
-    return _impl
-
-
-def _round():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.round(data)
     return _impl
 
 
@@ -1234,17 +1379,6 @@ def _expand_as():
         return inputs[0]
     return _impl
 
-def _neg():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.tensor.negative(data)
-    return _impl
-
-def _tanh():
-    def _impl(inputs, input_types):
-        data = inputs[0]
-        return _op.tensor.tanh(data)
-    return _impl
 
 def _Bool():
     def _impl(inputs, input_types):
@@ -1265,15 +1399,45 @@ def _mm():
     return _impl
 
 
-def _isfinite():
+def _bitwise_not():
     def _impl(inputs, input_types):
-        return _op.isfinite(inputs[0])
+        data = inputs[0]
+        # The input tensor must be of integral or Boolean types.
+        # For bool tensors, it computes the logical NOT
+        if input_types[0] == "bool":
+            out = _op.logical_not(_op.cast(data, "bool"))
+        else:
+            out = _op.bitwise_not(_op.cast(data, "int"))
+
+        return out
     return _impl
 
 
-def _isnan():
+def _bitwise_xor():
     def _impl(inputs, input_types):
-        return _op.isnan(inputs[0])
+        lhs = inputs[0]
+        rhs = inputs[1]
+        lhs = _op.cast(lhs, "bool") if input_types[0] == "bool" else _op.cast(lhs, "int")
+        rhs = _op.cast(rhs, "bool") if input_types[1] == "bool" else _op.cast(rhs, "int")
+
+        return _op.bitwise_xor(lhs, rhs)
+    return _impl
+
+
+def _logical_not():
+    def _impl(inputs, input_types):
+        data = inputs[0]
+
+        return _op.logical_not(_op.cast(data, "bool"))
+    return _impl
+
+
+def _logical_xor():
+    def _impl(inputs, input_types):
+        lhs = _op.cast(inputs[0], "bool")
+        rhs = _op.cast(inputs[1], "bool")
+
+        return _op.logical_xor(lhs, rhs)
     return _impl
 
 
@@ -1310,6 +1474,50 @@ def _tensor_array_stack(prelude):
         # passing stacked_shape below gives "'Prelude' object has no attribute" error
         get_tensor = prelude.get_var_static('tensor_get_data', "float32", shape)
         return get_tensor(stacked)
+    return _impl
+
+
+def _rsub():
+    def _impl(inputs, input_types):
+        # TODO: Figure out a better way to get typing to work for tensor + scalar
+        type0 = input_types[0]
+        if isinstance(inputs[1], _expr.Expr):
+            type0 = input_types[1]
+
+        type1 = input_types[1]
+        if isinstance(inputs[0], _expr.Expr):
+            type1 = input_types[0]
+
+        data1 = _convert_elemwise_input(inputs[0], type0)
+        data0 = _convert_elemwise_input(inputs[1], type1)
+        alpha = _expr.const(float(inputs[2]))
+
+        return get_relay_op("subtract")(data0, alpha * data1)
+    return _impl
+
+
+def _embedding():
+    def _impl(inputs, input_types):
+        weight = inputs[0]
+        indices = inputs[1]
+
+        return _op.take(weight, indices.astype('int32'), axis=0)
+    return _impl
+
+
+def _one_hot():
+    def _impl(inputs, input_types):
+        indices = inputs[0].astype('int32')
+        num_classes = inputs[1]
+        if num_classes == -1:
+            msg = "Inferring the number of classes is not yet supported."
+            raise NotImplementedError(msg)
+
+        dtype = 'int32'
+        on_value = tvm.relay.const(1.0, dtype)
+        off_value = tvm.relay.const(0.0, dtype)
+
+        return _op.one_hot(indices, on_value, off_value, num_classes, -1, dtype)
     return _impl
 
 
@@ -1399,12 +1607,18 @@ def _get_convert_map(prelude):
         "aten::mul"                             : _elemwise("multiply"),
         "aten::mul_"                            : _elemwise("multiply"),
         "aten::pow"                             : _elemwise("power"),
-        "aten::abs"                             : _abs(),
         "aten::arange"                          : _arange(),
         "aten::div"                             : _elemwise("divide"),
         "aten::div_"                            : _elemwise("divide"),
+        "aten::addcdiv"                         : _addcdiv(),
+        "aten::addcmul"                         : _addcmul(),
         "aten::ones"                            : _ones(),
+        "aten::ones_like"                       : _ones_like(),
         "aten::zeros"                           : _zeros(),
+        "aten::zeros_like"                      : _zeros_like(),
+        "aten::full"                            : _full(),
+        "aten::full_like"                       : _full_like(),
+        "aten::linspace"                        : _linspace(),
         "aten::reciprocal"                      : _reciprocal(),
         "aten::repeat"                          : _repeat(),
         "aten::repeat_interleave"               : _repeat_interleave(),
@@ -1416,6 +1630,9 @@ def _get_convert_map(prelude):
         "aten::split"                           : _split(),
         "aten::split_with_sizes"                : _split_with_sizes(),
         "aten::select"                          : _select(),
+        "aten::take"                            : _take(),
+        "aten::where"                           : _where(),
+        "aten::topk"                            : _topk(),
         "aten::relu"                            : _relu(),
         "aten::relu_"                           : _relu(),
         "aten::prelu"                           : _prelu(),
@@ -1441,6 +1658,7 @@ def _get_convert_map(prelude):
         "aten::batch_norm"                      : _batch_norm(),
         "aten::instance_norm"                   : _instance_norm(),
         "aten::layer_norm"                      : _layer_norm(),
+        "aten::group_norm"                      : _group_norm(),
         "aten::transpose"                       : _transpose(prelude),
         "aten::transpose_"                      : _transpose(prelude),
         "aten::t"                               : _transpose(prelude),
@@ -1473,12 +1691,31 @@ def _get_convert_map(prelude):
         "aten::argmax"                          : _reduce("argmax"),
         "aten::std"                             : _std(),
         "aten::var"                             : _variance(),
-        "aten::sqrt"                            : _sqrt(),
-        "aten::rsqrt"                           : _rsqrt(),
-        "aten::ceil"                            : _ceil(),
+        "aten::abs"                             : _unary("abs"),
+        "aten::neg"                             : _unary("negative"),
+        "aten::cos"                             : _unary("cos"),
+        "aten::cosh"                            : _unary("cosh"),
+        "aten::sin"                             : _unary("sin"),
+        "aten::sinh"                            : _unary("sinh"),
+        "aten::tan"                             : _unary("tan"),
+        "aten::tanh"                            : _unary("tanh"),
+        "aten::atan"                            : _unary("atan"),
+        "aten::log"                             : _unary("log"),
+        "aten::log2"                            : _unary("log2"),
+        "aten::log10"                           : _unary("log10"),
+        "aten::log1p"                           : _log1p(),
+        "aten::exp"                             : _unary("exp"),
+        "aten::erf"                             : _unary("erf"),
+        "aten::trunc"                           : _unary("trunc"),
+        "aten::sign"                            : _unary("sign"),
+        "aten::sqrt"                            : _unary("sqrt"),
+        "aten::rsqrt"                           : _unary("rsqrt"),
+        "aten::ceil"                            : _unary("ceil"),
+        "aten::floor"                           : _unary("floor"),
+        "aten::round"                           : _unary("round"),
+        "aten::isfinite"                        : _unary("isfinite"),
+        "aten::isnan"                           : _unary("isnan"),
         "aten::clamp"                           : _clamp(),
-        "aten::floor"                           : _floor(),
-        "aten::round"                           : _round(),
         "aten::detach"                          : _identity(),
         "aten::upsample_bilinear2d"             : _upsample("bilinear"),
         "aten::upsample_nearest2d"              : _upsample("nearest_neighbor"),
@@ -1489,14 +1726,17 @@ def _get_convert_map(prelude):
         "aten::ge"                              : _elemwise("greater_equal"),
         "aten::ne"                              : _elemwise("not_equal"),
         "aten::eq"                              : _elemwise("equal"),
-        "aten::isfinite"                        : _isfinite(),
-        "aten::isnan"                           : _isnan(),
+        "aten::logical_not"                     : _logical_not(),
+        "aten::logical_xor"                     : _logical_xor(),
+        "aten::bitwise_not"                     : _bitwise_not(),
+        "aten::bitwise_xor"                     : _bitwise_xor(),
         "aten::Bool"                            : _Bool(),
         "aten::Float"                           : _Float(),
-        "aten::neg"                             : _neg(),
-        "aten::tanh"                            : _tanh(),
         "aten::adaptive_avg_pool3d"             : _adaptive_avg_pool_3d(),
         "aten::adaptive_max_pool3d"             : _adaptive_max_pool_3d(),
+        "aten::rsub"                            : _rsub(),
+        "aten::embedding"                       : _embedding(),
+        "aten::one_hot"                         : _one_hot(),
         "aten::mm"                              : _matmul(),
         "relay::tensor_array_stack"             : _tensor_array_stack(prelude),
         "aten::add"                             : _add(prelude),
@@ -1662,7 +1902,7 @@ def _get_constant(node):
             tensor = node.t(attr_name)
             if len(tensor.shape) == 0:  # tensor(0.1)
                 return float(tensor)
-            return tensor
+            return _wrap_const(tensor.numpy())
         elif ty == "DeviceObjType":
             return node.s(attr_name)
         elif ty == "FunctionType":

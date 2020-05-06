@@ -22,7 +22,6 @@
  * \brief narrow the datatype of indexing vars
  */
 
-#include <tvm/tir/ir_pass.h>
 #include <tvm/tir/op.h>
 #include <tvm/tir/transform.h>
 #include <tvm/runtime/registry.h>

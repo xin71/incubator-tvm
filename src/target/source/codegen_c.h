@@ -153,7 +153,6 @@ class CodeGenC :
   void VisitStmt_(const AssertStmtNode* op) override;
   void VisitStmt_(const EvaluateNode* op) override;
   void VisitStmt_(const SeqStmtNode* op) override;
-  void VisitStmt_(const ProducerConsumerNode* op) override;
   /*!
    * Print Type represetnation of type t.
    * \param t The type representation.
@@ -257,29 +256,6 @@ class CodeGenC :
   std::unordered_map<const VarNode*, std::string> alloc_storage_scope_;
   /*! \brief the data type of allocated buffers */
   std::unordered_map<const VarNode*, DataType> handle_data_type_;
-
-  /*!
-   * \brief A RAII utility class for emitting code in a scoped region.
-   */
-  class EnterScopeRAII {
-    // The codegen context.
-    CodeGenC* cg;
-
-    // The new scope level.
-    int scope;
-
-   public:
-    explicit EnterScopeRAII(CodeGenC* cg) : cg(cg) {
-      cg->PrintIndent();
-      cg->stream << "{\n";
-      scope = cg->BeginScope();
-    }
-    ~EnterScopeRAII() {
-      cg->EndScope(scope);
-      cg->PrintIndent();
-      cg->stream << "}\n";
-    }
-  };
 
  private:
   /*! \brief whether to print in SSA form */

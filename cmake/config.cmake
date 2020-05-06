@@ -118,7 +118,7 @@ set(USE_MICRO_STANDALONE_RUNTIME OFF)
 # - ON: enable llvm with cmake's find search
 # - OFF: disable llvm
 # - /path/to/llvm-config: enable specific LLVM when multiple llvm-dev is available.
-set(USE_LLVM OFF)
+set(USE_LLVM /usr/lib/llvm-4.0/bin/llvm-config)
 
 #---------------------------------------------
 # Contrib libraries
@@ -153,6 +153,10 @@ set(USE_TFLITE OFF)
 
 # /path/to/tensorflow: tensorflow root path when use tflite library
 set(USE_TENSORFLOW_PATH none)
+
+# Required for full builds with TFLite. Not needed for runtime with TFLite.
+# /path/to/flatbuffers: flatbuffers root path when using tflite library
+set(USE_FLATBUFFERS_PATH none)
 
 # Possible values:
 # - OFF: disable tflite support for edgetpu

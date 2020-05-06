@@ -22,7 +22,6 @@
  * \file op_util.cc
  */
 #include <tvm/tir/expr.h>
-#include <tvm/tir/ir_pass.h>
 #include <tvm/tir/stmt_functor.h>
 #include <tvm/te/operation.h>
 #include <string>
@@ -132,8 +131,8 @@ MakeLoopNest(const Stage& stage,
         for (size_t j = 0; j < it_attr->prefetch_data.size(); ++j) {
           nest[i + 1].emplace_back(
               AttrStmtNode::make(it_attr->prefetch_data[j],
-                             tir::attr::prefetch_scope,
-                             it_attr->prefetch_offset[j], no_op));
+                                 tir::attr::prefetch_scope,
+                                 it_attr->prefetch_offset[j], no_op));
         }
       }
     } else if (bind_iv->thread_tag == "vthread" ||

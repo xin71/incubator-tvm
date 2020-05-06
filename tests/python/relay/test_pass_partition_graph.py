@@ -19,10 +19,10 @@ import os
 import sys
 
 import numpy as np
-import pytest
 
 import tvm
 import tvm.relay.testing
+import tvm.relay.op as reg
 from tvm import relay
 from tvm import runtime
 from tvm.relay import transform
@@ -30,6 +30,7 @@ from tvm.contrib import util
 from tvm.relay.backend import compile_engine
 from tvm.relay.expr_functor import ExprMutator
 from tvm.relay.op.annotation import compiler_begin, compiler_end
+from tvm.relay.op.contrib.register import get_pattern_table
 from tvm.relay.build_module import bind_params_by_name
 
 
@@ -456,7 +457,6 @@ def test_extern_dnnl_mobilenet():
     mod, params = relay.testing.mobilenet.get_workload(
         batch_size=1, dtype='float32')
 
-    mod["main"] = bind_params_by_name(mod["main"], params)
     mod = transform.AnnotateTarget(["dnnl"])(mod)
     mod = transform.MergeCompilerRegions()(mod)
     mod = transform.PartitionGraph()(mod)
@@ -522,8 +522,8 @@ def test_function_lifting():
         bn = relay.nn.batch_norm(data0, bn_gamma, bn_beta, bn_mmean, bn_mvar)
         func0 = relay.Function([data0, bn_gamma, bn_beta, bn_mmean, bn_mvar],
                                bn.astuple())
-        func0 = set_func_attr(func0, "test_compiler", "test_compiler_0")
-        gv0 = relay.GlobalVar("test_compiler_0")
+        func0 = set_func_attr(func0, "test_compiler", "test_compiler_2")
+        gv0 = relay.GlobalVar("test_compiler_2")
         mod[gv0] = func0
 
         # function for conv2d
@@ -536,8 +536,8 @@ def test_function_lifting():
             channels=16,
             padding=(1, 1))
         func1 = relay.Function([data1, weight1], conv)
-        func1 = set_func_attr(func1, "test_compiler", "test_compiler_1")
-        gv1 = relay.GlobalVar("test_compiler_1")
+        func1 = set_func_attr(func1, "test_compiler", "test_compiler_0")
+        gv1 = relay.GlobalVar("test_compiler_0")
         mod[gv1] = func1
 
         # main function
@@ -630,7 +630,6 @@ def test_constant_propagation():
 
     def expected():
         mod = tvm.IRModule()
-        x = relay.const(ones)
         y = relay.var("y", shape=(8, 8))
         x0 = relay.const(ones)
         y0 = relay.var("y0", shape=(8, 8))
@@ -712,12 +711,12 @@ def test_multiple_outputs():
         mod = tvm.IRModule()
 
         # function 0
-        data = relay.var("test_target_2_i0", relay.TensorType((1, 3, 224, 224), "float32"))
-        weight = relay.var("test_target_2_i1", relay.TensorType((16, 3, 3, 3), "float32"))
-        bn_gamma = relay.var("test_target_2_i2", relay.TensorType((16, ), "float32"))
-        bn_beta = relay.var("test_target_2_i3", relay.TensorType((16, ), "float32"))
-        bn_mean = relay.var("test_target_2_i4", relay.TensorType((16, ), "float32"))
-        bn_var = relay.var("test_target_2_i5", relay.TensorType((16, ), "float32"))
+        data = relay.var("test_target_0_i0", relay.TensorType((1, 3, 224, 224), "float32"))
+        weight = relay.var("test_target_0_i1", relay.TensorType((16, 3, 3, 3), "float32"))
+        bn_gamma = relay.var("test_target_0_i2", relay.TensorType((16, ), "float32"))
+        bn_beta = relay.var("test_target_0_i3", relay.TensorType((16, ), "float32"))
+        bn_mean = relay.var("test_target_0_i4", relay.TensorType((16, ), "float32"))
+        bn_var = relay.var("test_target_0_i5", relay.TensorType((16, ), "float32"))
 
         conv_o = relay.nn.conv2d(
             data=data,
@@ -730,12 +729,12 @@ def test_multiple_outputs():
                                    bn_var)
 
         relu_o = relay.nn.relu(bn_o[0])
-        tuple_o = relay.Tuple((bn_o[2], bn_o[1], relu_o))
+        tuple_o = relay.Tuple((relu_o, bn_o[1], bn_o[2]))
 
         func0 = relay.Function([data, weight, bn_gamma, bn_beta,
                                 bn_mean, bn_var], tuple_o)
-        func0 = set_func_attr(func0, "test_target", "test_target_2")
-        gv0 = relay.GlobalVar("test_target_2")
+        func0 = set_func_attr(func0, "test_target", "test_target_0")
+        gv0 = relay.GlobalVar("test_target_0")
         mod[gv0] = func0
 
         # body
@@ -747,9 +746,9 @@ def test_multiple_outputs():
         bn_var = relay.var("bn_var", relay.TensorType((16, ), "float32"))
 
         f0_o = gv0(data, weight, bn_gamma, bn_beta, bn_mean, bn_var)
-        f0_relu_o = relay.TupleGetItem(f0_o, 2)
+        f0_relu_o = relay.TupleGetItem(f0_o, 0)
         f0_mean_o = relay.TupleGetItem(f0_o, 1)
-        f0_var_o = relay.TupleGetItem(f0_o, 0)
+        f0_var_o = relay.TupleGetItem(f0_o, 2)
 
         f0_mean_abs = relay.abs(f0_mean_o)
         f0_var_abs = relay.abs(f0_var_o)
@@ -791,22 +790,22 @@ def test_mixed_single_multiple_outputs():
         mod = tvm.IRModule()
 
         # function 1
-        f1_cb1 = relay.var('test_target_1_i0', shape=(10, 10))
+        f1_cb1 = relay.var('test_target_0_i0', shape=(10, 10))
         f1_O_1 = relay.abs(f1_cb1)
         f1_O_2 = relay.nn.relu(f1_O_1)
         f1_out = relay.Tuple((f1_O_2, f1_O_1))
         func1 = relay.Function([f1_cb1], f1_out)
-        func1 = set_func_attr(func1, "test_target", "test_target_1")
-        gv1 = relay.GlobalVar("test_target_1")
+        func1 = set_func_attr(func1, "test_target", "test_target_0")
+        gv1 = relay.GlobalVar("test_target_0")
         mod[gv1] = func1
 
         # function 0
-        f2_cb3 = relay.var('test_target_0_i0', shape=(10, 10))
-        f2_cb4 = relay.var('test_target_0_i1', shape=(10, 10))
+        f2_cb3 = relay.var('test_target_1_i0', shape=(10, 10))
+        f2_cb4 = relay.var('test_target_1_i1', shape=(10, 10))
         f2_O_3 = relay.add(f2_cb3, f2_cb4)
         func0 = relay.Function([f2_cb3, f2_cb4], f2_O_3)
-        func0 = set_func_attr(func0, "test_target", "test_target_0")
-        gv0 = relay.GlobalVar("test_target_0")
+        func0 = set_func_attr(func0, "test_target", "test_target_1")
+        gv0 = relay.GlobalVar("test_target_1")
         mod[gv0] = func0
 
         # body
@@ -831,21 +830,8 @@ def test_mixed_single_multiple_outputs():
 
 
 def test_dnnl_fuse():
-    def make_pattern(with_bias=True):
-        data = relay.var("data", relay.TensorType((1, 3, 224, 224), "float32"))
-        weight = relay.var("weight")
-        bias = relay.var("bias")
-        conv = relay.nn.conv2d(data=data, weight=weight, kernel_size=(3, 3),
-                               channels=8, padding=(1, 1))
-        if with_bias:
-            conv_out = relay.add(conv, bias)
-        else:
-            conv_out = conv
-        return relay.nn.relu(conv_out)
-
-    conv2d_bias_relu_pat = ("dnnl.conv2d_bias_relu", make_pattern(with_bias=True))
-    conv2d_relu_pat = ("dnnl.conv2d_relu", make_pattern(with_bias=False))
-    dnnl_patterns = [conv2d_bias_relu_pat, conv2d_relu_pat]
+    dnnl_patterns = get_pattern_table("dnnl")
+    conv2d_bias_relu_pat, conv2d_relu_pat = dnnl_patterns
 
     def get_blocks(prefix, data, in_channel, out_channel,
                    include_bn=True, include_sigmoid=False):
@@ -1036,6 +1022,174 @@ def test_multiple_use_of_an_output():
     test_same_output_region()
     test_different_output_region()
 
+def test_duplicate_outputs():
+    target = "test_duplicate_outputs"
+
+    @reg.register("abs", "target." + target)
+    def abs(attrs, args): # pylint: disable=unused-variable
+        return True
+
+    def create_graph():
+        data = relay.var('data', shape=(10, 10))
+        x = relay.abs(data)
+        out_1 = relay.nn.relu(x)
+        out_2 = relay.tanh(x)
+        out_3 = relay.log(x)
+        out = relay.Tuple([out_1, out_2, out_3])
+        func = relay.Function([data], out)
+        return func
+
+    def expected():
+        mod = tvm.IRModule()
+
+        # function 0
+        f0_i0 = relay.var(target+"_0_i0", shape=(10, 10))
+        f0_o0 = relay.abs(f0_i0)
+        func0 = relay.Function([f0_i0], f0_o0)
+
+        func0 = func0.with_attr("Primitive", tvm.tir.IntImm("int32", 1))
+        func0 = func0.with_attr("Inline", tvm.tir.IntImm("int32", 1))
+        func0 = func0.with_attr("Compiler", target)
+        func0 = func0.with_attr("global_symbol", target+"_0")
+        gv0 = relay.GlobalVar(target+"_0")
+        mod[gv0] = func0
+
+        # body
+        data = relay.var('data', shape=(10, 10))
+        function_out = gv0(data)
+        out_1 = relay.nn.relu(function_out)
+        out_2 = relay.tanh(function_out)
+        out_3 = relay.log(function_out)
+        out = relay.Tuple([out_1, out_2, out_3])
+        func = relay.Function([data], out)
+        mod["main"] = func
+        return mod
+
+    mod = tvm.IRModule()
+    mod["main"] = create_graph()
+
+    seq = tvm.transform.Sequential([
+        transform.AnnotateTarget(target),
+        transform.MergeCompilerRegions(),
+        transform.PartitionGraph(),
+    ])
+
+    ref_mod = expected()
+    partitioned = seq(mod)
+    assert tvm.ir.structural_equal(partitioned, ref_mod, map_free_vars=True)
+
+def test_duplicate_merge_and_tuplegetitem():
+    target = "test_duplicate_merge_and_tuplegetitem"
+
+    @reg.register("nn.batch_norm", "target." + target)
+    def abs(attrs, args): # pylint: disable=unused-variable
+        return True
+
+    @reg.register("nn.relu", "target." + target)
+    def abs(attrs, args): # pylint: disable=unused-variable
+        return True
+
+    def create_graph():
+        data = relay.var('data', shape=(10, 10))
+        bn_gamma = relay.var("bn_gamma")
+        bn_beta = relay.var("bn_beta")
+        bn_mmean = relay.var("bn_mean")
+        bn_mvar = relay.var("bn_var")
+        x = relay.nn.batch_norm(data, bn_gamma, bn_beta, bn_mmean, bn_mvar)
+        out_1 = relay.nn.relu(x[0])
+        bn_out_1 = x[1]
+        out_2 = relay.tanh(bn_out_1)
+        out_3 = relay.log(bn_out_1)
+        out = relay.Tuple([out_1, out_2, out_3])
+        func = relay.Function([data, bn_gamma, bn_beta, bn_mmean, bn_mvar], out)
+        return func
+
+    def expected():
+        mod = tvm.IRModule()
+
+        # function 0
+        f0_i0 = relay.var(target + "_0_i0", shape=(10, 10))
+        f0_i1 = relay.var(target + "_0_i1")
+        f0_i2 = relay.var(target + "_0_i2")
+        f0_i3 = relay.var(target + "_0_i3")
+        f0_i4 = relay.var(target + "_0_i4")
+        f0_n0 = relay.nn.batch_norm(f0_i0, f0_i1, f0_i2, f0_i3, f0_i4)
+        f0_n1 = f0_n0[1]
+        f0_n2 = relay.nn.relu(f0_n0[0])
+        f0_o0 = relay.Tuple([f0_n2, f0_n1])
+        func0 = relay.Function([f0_i0, f0_i1, f0_i2, f0_i3, f0_i4], f0_o0)
+
+        func0 = func0.with_attr("Primitive", tvm.tir.IntImm("int32", 1))
+        func0 = func0.with_attr("Inline", tvm.tir.IntImm("int32", 1))
+        func0 = func0.with_attr("Compiler", target)
+        func0 = func0.with_attr("global_symbol", target + "_0")
+        gv0 = relay.GlobalVar(target + "_0")
+        mod[gv0] = func0
+
+        # body
+        data = relay.var('data', shape=(10, 10))
+        bn_gamma = relay.var("bn_gamma")
+        bn_beta = relay.var("bn_beta")
+        bn_mmean = relay.var("bn_mean")
+        bn_mvar = relay.var("bn_var")
+        function_out = gv0(data, bn_gamma, bn_beta, bn_mmean, bn_mvar)
+        get_out0 = relay.TupleGetItem(function_out, 0)
+        get_out1 = relay.TupleGetItem(function_out, 1)
+        out_2 = relay.tanh(get_out1)
+        out_3 = relay.log(get_out1)
+        out = relay.Tuple([get_out0, out_2, out_3])
+        func = relay.Function([data, bn_gamma, bn_beta, bn_mmean, bn_mvar], out)
+        mod["main"] = func
+        return mod
+
+    mod = tvm.IRModule()
+    mod["main"] = create_graph()
+
+    seq = tvm.transform.Sequential([
+        transform.AnnotateTarget(target),
+        transform.MergeCompilerRegions(),
+        transform.PartitionGraph(),
+    ])
+
+    ref_mod = expected()
+    partitioned = seq(mod)
+    assert tvm.ir.structural_equal(partitioned, ref_mod, map_free_vars=True)
+
+def test_constant_tuples():
+    @reg.register("qnn.concatenate", "target.const_tuples")
+    def add(attrs, args):  # pylint: disable=unused-variable
+        return True
+
+    def create_graph():
+        a = relay.var('a', shape=(10, 10), dtype="uint8")
+        b = relay.var('b', shape=(10, 10), dtype="uint8")
+        a1 = relay.abs(a)
+
+        zeroi = relay.const(1, "int32")
+        zerof = relay.const(0, "float32")
+        con = relay.qnn.op.concatenate((a1, b),
+                                       input_scales=(zerof, zerof),
+                                       input_zero_points=(zeroi, zeroi),
+                                       output_scale=zerof,
+                                       output_zero_point=zeroi,
+                                       axis=1)
+
+        f = relay.Function([a, b], con)
+        mod = tvm.IRModule.from_expr(f)
+        return mod
+
+    seq = tvm.transform.Sequential([
+        transform.AnnotateTarget("const_tuples"),
+        transform.MergeCompilerRegions(),
+        transform.PartitionGraph(),
+    ])
+
+    partitioned = seq(create_graph())
+    concat = partitioned["const_tuples_0"].body
+    assert type(concat.args[1]) == relay.Tuple
+    assert type(concat.args[2]) == relay.Tuple
+    assert type(concat.args[3]) == relay.Constant
+    assert type(concat.args[4]) == relay.Constant
 
 if __name__ == "__main__":
     test_multi_node_compiler()
@@ -1051,3 +1205,6 @@ if __name__ == "__main__":
     test_mixed_single_multiple_outputs()
     test_dnnl_fuse()
     test_multiple_use_of_an_output()
+    test_duplicate_outputs()
+    test_duplicate_merge_and_tuplegetitem()
+    test_constant_tuples()

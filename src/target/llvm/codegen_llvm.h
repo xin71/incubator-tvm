@@ -45,7 +45,7 @@
 #include "llvm_common.h"
 #include "../../runtime/thread_storage_scope.h"
 #include "../../arith/compute_expr.h"
-#include "../../tir/pass/ir_util.h"
+#include "../../tir/transforms/ir_util.h"
 
 namespace tvm {
 namespace codegen {
@@ -150,7 +150,6 @@ class CodeGenLLVM :
   void VisitStmt_(const LetStmtNode* op) override;
   void VisitStmt_(const SeqStmtNode* op) override;
   void VisitStmt_(const EvaluateNode* op) override;
-  void VisitStmt_(const ProducerConsumerNode* op) override;
 
  protected:
   /*! \brief The storage information */

@@ -442,6 +442,16 @@ struct Conv2DTransposeAttrs : public tvm::AttrsNode<Conv2DTransposeAttrs> {
   }
 };
 
+/*! \brief Attributes used in dilate operator */
+struct DilateAttrs : public tvm::AttrsNode<DilateAttrs> {
+  Array<IndexExpr> strides;
+
+  TVM_DECLARE_ATTRS(DilateAttrs, "relay.attrs.DilateAttrs") {
+    TVM_ATTR_FIELD(strides).set_default(Array<IndexExpr>({1, 1}))
+      .describe("Dilation stride on each dimension, 1 means no dilation.");
+  }
+};
+
 /*! \brief Attributes used in 1D transposed convolution operator */
 struct Conv1DTransposeAttrs : public tvm::AttrsNode<Conv1DTransposeAttrs> {
   IndexExpr channels;
@@ -957,6 +967,30 @@ struct LayerNormAttrs : public tvm::AttrsNode<LayerNormAttrs> {
       .describe("If true, multiply by gamma; otherwise, gamma is ignored.");
   }
 };  // struct LayerNormAttrs
+
+
+/*! \brief Attributes used in group_norm operator */
+struct GroupNormAttrs : public tvm::AttrsNode<GroupNormAttrs> {
+  int num_groups;
+  int axis;
+  double epsilon;
+  bool center;
+  bool scale;
+
+  TVM_DECLARE_ATTRS(GroupNormAttrs, "relay.attrs.GroupNormAttrs") {
+    TVM_ATTR_FIELD(num_groups).set_default(0)
+      .describe("Specify number of groups to separate the channels into.");
+    TVM_ATTR_FIELD(axis).set_default(1)
+      .describe("Specify which shape axis denotes the channel.");
+    TVM_ATTR_FIELD(epsilon).set_default(1e-5)
+      .describe("Small float added to variance to avoid dividing by zero");
+    TVM_ATTR_FIELD(center).set_default(true)
+      .describe("If true, add offset of beta to normalized tensor; "
+                "otherwise, beta is ignored.");
+    TVM_ATTR_FIELD(scale).set_default(true)
+      .describe("If true, multiply by gamma; otherwise, gamma is ignored.");
+  }
+};  // struct GroupNormAttrs
 
 
 /*! \brief Attributes for LRN operator */

@@ -694,7 +694,10 @@ class CallNode : public PrimExprNode {
     ExternCPlusPlus = 1,
     /*! \brief Extern "C" without side-effect. */
     PureExtern = 2,
-    /*! \brief Halide-style call, evaluates func(args). */
+    /*!
+     * \brief Halide-style call, evaluates func(args).
+     * \note Deprecated, move to BufferLoad in the future.
+     */
     Halide = 3,
     /*! \brief Intrinsic functions. */
     Intrinsic = 4,
@@ -707,9 +710,15 @@ class CallNode : public PrimExprNode {
   Array<PrimExpr> args;
   /*! \brief Type of calls. */
   CallType call_type;
-  /*! \brief The function to be called. */
+  /*!
+   * \brief The function to be called.
+   * \note Deprecated, move to BufferLoad in the future.
+   */
   FunctionRef func;
-  /*! \brief The output value index if func's value is a tuple. */
+  /*!
+   * \brief The output value index if func's value is a tuple.
+   * \note Deprecated, move to BufferLoad in the future.
+   */
   int value_index{0};
 
   void VisitAttrs(AttrVisitor* v) {
@@ -1228,9 +1237,17 @@ constexpr const char* tvm_storage_sync = "tvm_storage_sync";
 /*!
  * \brief See pseudo code
  *
- *  Type tvm_warp_shuffle(Type value, warp_id) {
+ *  Type tvm_warp_shuffle(Type value, warp_id, width, warp_size) {
  *     return (value passed in by warp indicated by warp_id);
  *  }
+ *
+ *  Parameter warp_id indicates the source thread ID in a warp.
+ *
+ *  Parameter width indicates the number of threads involved in one
+ *  shuffle. See CUDA document for __shfl.
+ *
+ *  Parameter warp_size is the size of a warp, which helps a backend
+ *  to determine wheter the width paramter is legal.
  */
 constexpr const char* tvm_warp_shuffle = "tvm_warp_shuffle";
 /*!

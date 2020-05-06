@@ -73,7 +73,9 @@ ALLOW_EXTENSION = {
     "sdc",
     # generated parser
     "interp",
-    "tokens"
+    "tokens",
+    # interface definition
+    "idl",
     }
 
 # List of file names allowed
@@ -101,7 +103,8 @@ ALLOW_SPECIFIC_FILE = {
     "KEYS",
     "DISCLAIMER",
     "Jenkinsfile",
-    # sgx config
+    # cargo config
+    "rust/runtime/tests/test_wasm32/.cargo/config",
     "apps/sgx/.cargo/config",
     # html for demo purposes
     "tests/webgl/test_static_webgl_library.html",
