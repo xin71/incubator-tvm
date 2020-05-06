@@ -60,7 +60,6 @@ def _as_list(arr):
 
 
 def _convert_attention_mask(inexpr, keras_layer, etab):
-    print('converting attention!')
     xsum = _op.reduce.sum(_op.reduce.sum(inexpr, axis=2, keepdims=True), axis=3, keepdims=True)
     xshape = infer_shape(xsum)
     out = inexpr / xsum * tvm.relay.expr.const(xshape[2], dtype='float32') \
@@ -249,15 +248,12 @@ def _convert_convolution(inexpr, keras_layer, etab):
     is_depthconv = type(keras_layer).__name__ == 'DepthwiseConv2D'
     weightList = keras_layer.get_weights()
     weight = weightList[0]
-    print('etab.data_layout', etab.data_layout)
     if etab.data_layout == 'NHWC':
-        print('Got here NHWC!')
         if is_depthconv:
             kernel_layout = 'HWOI'
         else:
             kernel_layout = 'HWIO'
     else:
-        print('got here kernel layout OIHW')
         kernel_layout = 'OIHW'
 
 
@@ -271,7 +267,6 @@ def _convert_convolution(inexpr, keras_layer, etab):
             weight = weight.transpose([2, 3, 0, 1])
     elif etab.data_layout == 'NCHW':
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
-        print('weight.shape', weight.shape)
         weight = weight.transpose([3, 2, 0, 1])
     else:
         kernel_h, kernel_w, in_channels, n_filters = weight.shape
@@ -333,8 +328,6 @@ def _convert_convolution(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-    print('output shape: ', infer_shape(out))
-    print('finish convolution 2D')
     return out
 
 def _convert_convolution3d(inexpr, keras_layer, etab):
