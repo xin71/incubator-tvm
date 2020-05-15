@@ -66,6 +66,32 @@ def _convert_attention_mask(inexpr, keras_layer, etab):
           * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
     return out
 
+def _convert_tsm(inexpr, keras_layer, etab):
+
+    nt, c, h, w = infer_shape(inexpr)
+    n = int(nt / 10)
+    fold_div = 3
+    x = _op.transform.reshape(inexpr, [n, 10, c, h, w])
+    fold = c // 3
+    # last_fold = c - (fold_div - 1) * fold
+    split_out = _op.split(x, (fold, fold*2, ), axis=2)
+
+    out1, out2, out3 = split_out[0], split_out[1], split_out[2]
+
+    padding_1 = _op.zeros((n, 1, fold, h, w), dtype="float32")
+    out1 = _op.split(out1, (1, ), axis=1)[1]
+    out1 = _op.concatenate([out1, padding_1], axis=1)
+
+    # Shift right
+    padding_2 = _op.zeros((n, 1, fold, h, w), dtype="float32")
+    out2 = _op.split(out2, (10 - 1, ), axis=1)[0]
+    out2 = _op.concatenate([padding_2, out2], axis=1)
+
+    out = _op.concatenate([out1, out2, out3], axis=2)
+    out = _op.reshape(out, (-1, c, h, w))
+
+    return out
+
 
 def _convert_recurrent_activation(inexpr, keras_layer):
     act_type = keras_layer.recurrent_activation.__name__
@@ -848,6 +874,7 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 
 
 _convert_map = {
+    'TSM': _convert_tsm,
     'Attention_mask': _convert_attention_mask,
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
