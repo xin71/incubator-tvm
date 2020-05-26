@@ -60,8 +60,9 @@ def _as_list(arr):
 
 
 def _convert_attention_mask(inexpr, keras_layer, etab):
+    # print('input of attetnion mask', infer_shape(inexpr))
     xsum = _op.reduce.sum(_op.reduce.sum(inexpr, axis=2, keepdims=True), axis=3, keepdims=True)
-    xshape = infer_shape(xsum)
+    xshape = infer_shape(inexpr)
     out = inexpr / xsum * tvm.relay.expr.const(xshape[2], dtype='float32') \
           * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
     return out
