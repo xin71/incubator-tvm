@@ -60,12 +60,16 @@ def _as_list(arr):
 
 
 def _convert_attention_mask(inexpr, keras_layer, etab):
-    # print('input of attetnion mask', infer_shape(inexpr))
     xsum = _op.reduce.sum(_op.reduce.sum(inexpr, axis=2, keepdims=True), axis=3, keepdims=True)
     xshape = infer_shape(inexpr)
     out = inexpr / xsum * tvm.relay.expr.const(xshape[2], dtype='float32') \
           * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
     return out
+
+
+def _convert_expand_dim(inexpr, keras_layer, etab):
+    return _op.transform.expand_dims(inexpr, -1)
+
 
 def _convert_tsm(inexpr, keras_layer, etab):
 
@@ -427,7 +431,6 @@ def _convert_convolution3d(inexpr, keras_layer, etab):
         act_type = keras_layer.activation.__name__
     if act_type != 'linear':
         out = _convert_activation(out, act_type, etab)
-
     return out
 
 def _convert_separable_convolution(inexpr, keras_layer, etab):
@@ -877,6 +880,7 @@ def _default_skip(inexpr, keras_layer, _): # pylint: disable=unused-argument
 _convert_map = {
     'TSM': _convert_tsm,
     'Attention_mask': _convert_attention_mask,
+    'Expand_dim': _convert_expand_dim,
     'Dense'                    : _convert_dense,
     'Activation'               : _convert_activation,
     'Softmax'                  : _convert_advanced_activation,
@@ -1021,11 +1025,21 @@ def from_keras(model, shape=None, layout='NCHW', dtype='float32'):
         return type(model).__module__.startswith("tensorflow.python.keras")
 
     def _convert_input_layer(keras_layer):
-        input_name = keras_layer.name
-        # input_shape = shape[input_name] if shape is not None and input_name in shape else None
-        var = new_var(input_name, shape=shape, dtype=dtype)
-        # etab.set_expr(input_name, new_var(input_name, shape=input_shape))
-        etab.set_expr(input_name, var)
+
+        if len(shape) == 2: # For mix model
+            input_name = keras_layer.name
+            if input_name == 'app':
+                var = new_var(input_name, shape=shape[0], dtype=dtype)
+                etab.set_expr(input_name, var)
+            else:
+                var = new_var(input_name, shape=shape[1], dtype=dtype)
+                etab.set_expr(input_name, var)
+        else:
+            input_name = keras_layer.name
+            # input_shape = shape[input_name] if shape is not None and input_name in shape else None
+            var = new_var(input_name, shape=shape, dtype=dtype)
+            # etab.set_expr(input_name, new_var(input_name, shape=input_shape))
+            etab.set_expr(input_name, var)
 
     is_tf_keras = _check_model_is_tf_keras()
 
@@ -1058,8 +1072,17 @@ def from_keras(model, shape=None, layout='NCHW', dtype='float32'):
     etab.data_layout = layout
     for keras_layer in model.layers:
         if isinstance(keras_layer, input_layer_class):
+            # if len(shape) == 2 and keras_layer.name == 'app':
+            #     etab.data_layout = 'NCHW'
+            # else:
+            #     etab.data_layout = layout
             _convert_input_layer(keras_layer)
         else:
+            if len(shape) == 2 and 'conv2d' in keras_layer.name or len(shape) == 2 and 'pooling2d' in keras_layer.name:
+                print('Processing layer: ', keras_layer.name)
+                etab.data_layout = 'NCHW'
+            else:
+                etab.data_layout = layout
             inbound_nodes = keras_layer.inbound_nodes if hasattr(keras_layer, 'inbound_nodes') \
                        else keras_layer._inbound_nodes if hasattr(keras_layer, '_inbound_nodes') \
                        else None
