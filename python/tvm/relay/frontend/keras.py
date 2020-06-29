@@ -64,6 +64,8 @@ def _convert_attention_mask(inexpr, keras_layer, etab):
     xshape = infer_shape(inexpr)
     out = inexpr / xsum * tvm.relay.expr.const(xshape[2], dtype='float32') \
           * tvm.relay.expr.const(xshape[3], dtype='float32') * tvm.relay.expr.const(0.5, dtype='float32')
+    # print('gate1 shape', infer_shape(out))
+    # raise
     return out
 
 
@@ -1033,6 +1035,17 @@ def from_keras(model, shape=None, layout='NCHW', dtype='float32'):
                 etab.set_expr(input_name, var)
             else:
                 var = new_var(input_name, shape=shape[1], dtype=dtype)
+                etab.set_expr(input_name, var)
+        elif len(shape) == 3: # For mix model
+            input_name = keras_layer.name
+            if input_name == 'motion':
+                var = new_var(input_name, shape=shape[0], dtype=dtype)
+                etab.set_expr(input_name, var)
+            elif input_name == 'gate1':
+                var = new_var(input_name, shape=shape[1], dtype=dtype)
+                etab.set_expr(input_name, var)
+            else:
+                var = new_var(input_name, shape=shape[2], dtype=dtype)
                 etab.set_expr(input_name, var)
         else:
             input_name = keras_layer.name
